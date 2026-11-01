@@ -4,6 +4,10 @@ require 'test_helper'
 
 module RogueMachines
   class ExpiryTest < Test
+    # An epoch no replacement clock in these tests advances past, so the swap
+    # is to a lower reading whatever the host's uptime happens to be.
+    LATE_EPOCH = 10**18
+
     def test_an_experiment_stops_at_its_expiry_without_anyone_disarming_it
       RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 60)
 
@@ -69,6 +73,7 @@ module RogueMachines
       # Pinning a limitation. Nothing is inferred from a reading that looks
       # early, so only RogueMachines.clock= disarms.
       RogueMachines.clock = nil
+      DeadlineMachines.clock = DeadlineMachines::TestClock.new(now_ns: LATE_EPOCH)
       RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 60)
       DeadlineMachines.clock = DeadlineMachines::TestClock.new
       DeadlineMachines.clock.advance(86_400)
