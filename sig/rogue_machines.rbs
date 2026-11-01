@@ -1,0 +1,146 @@
+# Fault injection: making a dependency fail, stall or lie on purpose.
+module RogueMachines
+  VERSION: String
+
+  # Nanoseconds in a second.
+  NS_PER_SECOND: Integer
+
+  # Millionths in a whole, the unit a share is held in.
+  PER_MILLION: Integer
+
+  # Experiments a process can arm at once, the width of the armed mask.
+  EXPERIMENTS: Integer
+
+  # Attempts at one consistent reading before giving up on a clock being
+  # replaced faster than it can be read.
+  READINGS: Integer
+
+  class Error < StandardError
+  end
+
+  # Raised by a `:raise` fault in place of the real call.
+  class Injected < Error
+  end
+
+  # The fault to perform for one call.
+  class Injection < ::Data
+    # `:raise`, `:delay` or `:garble`.
+    attr_reader fault: Symbol
+
+    # How long a `:delay` waits, and zero for the others.
+    attr_reader delay_ns: Integer
+  end
+
+  # Anything that reports monotonic nanoseconds.
+  interface _Clock
+    def now_ns: () -> Integer
+  end
+
+  # Anything that draws below a bound, which `Random` satisfies.
+  interface _Random
+    def rand: (Integer bound) -> Integer
+  end
+
+  # The experiments a process is running, by name. Reach it through the module.
+  class Rogue
+    def self.new: () -> instance
+
+    # Whether any experiment is armed as of the last sweep, which is the whole
+    # of the decision a disarmed process takes. A sweep happens on every
+    # `decide` and every `armed`, so this trails an expiry by one call.
+    def any_armed?: () -> bool
+
+    # Sweeps expired experiments at `now_ns`, then counts what is left.
+    # Reports 0 without sweeping for a superseded generation. Every seam
+    # taking a reading refuses a Float rather than truncating it.
+    def armed_count: (Integer now_ns, Integer generation) -> Integer
+
+    # Arms `name`, replacing any experiment already there. Raises
+    # `ArgumentError` for an unknown fault, a share outside a whole or below
+    # one millionth, a duration that is non-positive, below a nanosecond or
+    # longer than the cap, a `now_ns` that is not an Integer or is outside the
+    # range, or a `:delay`
+    # with no `delay:`. Raises `Error` when every slot is taken. Nothing is
+    # armed and no slot is taken when it raises.
+    def arm: (String name, fault: String, share: Float, expires_in: Float,
+              now_ns: Integer, generation: Integer, ?delay: Float) -> void
+
+    # Reports whether `name` was still running, which an experiment that
+    # expired on its own is not.
+    def disarm: (String name, Integer now_ns, Integer generation) -> bool
+
+    def disarm_all: () -> void
+
+    # Which clock the armed expiries were computed against. Every reading is
+    # only meaningful for one of these, and a call carrying another one is
+    # refused rather than acted on, since sweeping is destructive.
+    def generation: () -> Integer
+
+    # Disarms everything and starts a generation, retiring readings already
+    # taken against the outgoing clock. Returns the new generation.
+    def invalidate: () -> Integer
+
+    # The names still running at `now_ns`, in no particular order, and none
+    # for a superseded generation.
+    def armed: (Integer now_ns, Integer generation) -> Array[String]
+
+    # The fault to perform, or `nil` to make the real call. Raises
+    # `ArgumentError` for a `draw` or `now_ns` that is not an Integer, is
+    # outside its range, or is a `draw` at or above `PER_MILLION`. A Float is
+    # refused rather than truncated, because a truncated draw becomes 0,
+    # which every share covers.
+    def decide: (String name, Integer now_ns, Integer draw, Integer generation) -> Injection?
+
+    def inspect: () -> String
+  end
+
+  # Delegates to `DeadlineMachines.clock` when unset, rather than memoising
+  # it, so replacing that clock moves every expiry with it.
+  def self.clock: () -> _Clock
+
+  # Disarms everything first: an armed expiry was computed against the
+  # outgoing clock and is not meaningful against another one.
+  def self.clock=: (_Clock?) -> void
+  def self.random: () -> _Random
+  def self.random=: (_Random?) -> void
+    # The registry itself. Reach for the module methods instead: arming
+    # through this bypasses the substitute a `:garble` returns, and freezing
+    # it does not prevent arming, since the native side holds its own state.
+  def self.registry: () -> Rogue
+
+  # Arms an experiment under `name`. `expires_in` counts from now and is
+  # required, so no experiment outlives the person who armed it.
+  #
+  # Raises `ArgumentError` for a blank name, a name that is neither ASCII nor
+  # valid UTF-8, or any argument the registry refuses. Raises `Error` when
+  # every slot is taken, when the clock was replaced faster than a reading
+  # could be taken, and when the clock returned something that is not a
+  # non-negative Integer of nanoseconds.
+  #
+  # `share`, `expires_in` and `delay` go through `Float()`, so a String that
+  # parses as a number is accepted, one that does not raises `ArgumentError`,
+  # and a value with no numeric conversion at all raises `TypeError`.
+  def self.arm: (Symbol | String name, fault: Symbol | String, share: Numeric | String,
+                 expires_in: Numeric | String, ?delay: (Numeric | String)?,
+                 ?garbled: untyped) -> (Symbol | String)
+
+  def self.disarm: (Symbol | String name) -> bool
+  def self.disarm_all: () -> void
+
+  # With no name, whether anything at all is armed.
+  def self.armed?: (?(Symbol | String)?) -> bool
+
+  # The experiments still running, which excludes any that has expired.
+  def self.armed: () -> Array[Symbol]
+
+  # Runs the block, or the fault armed under `name` instead. Not the block's
+  # own type: a `:garble` returns the substitute it was armed with, which is
+  # whatever the caller passed as `garbled:`. Makes the real call when the
+  # clock was replaced faster than a reading could be taken.
+  #
+  # Raises `Injected` for a `:raise` fault, which is the point of the gem,
+  # `DeadlineMachines::Error` when a `:delay` spends the ambient budget,
+  # `ArgumentError` for a name it cannot key on or a draw the random gave it,
+  # and `Error` for a clock returning an unusable reading.
+  def self.run: (Symbol | String name) { () -> untyped } -> untyped
+end

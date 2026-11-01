@@ -1,0 +1,19 @@
+[package]
+name = "rogue_machines_native"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Abdelkader Boudih <oss@seuros.com>"]
+license = "MIT"
+description = "Ruby bindings for the rogue-machines fault injector"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+rogue-machines = { workspace = true, features = ["std"] }
+magnus = "0.9"
