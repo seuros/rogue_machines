@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2](https://github.com/seuros/rogue_machines/compare/rogue_machines/v0.1.1...rogue_machines/v0.1.2) (2026-11-01)
+
+
+### Bug Fixes
+
+* a republished platform gem is skipped, not fatal ([1190768](https://github.com/seuros/rogue_machines/commit/119076835e9e41d77fee67e40e0cc1646a8f9354))
+* enable the rb-sys compiled fallback so new Rubies can build ([c36ad72](https://github.com/seuros/rogue_machines/commit/c36ad72c622ee5c3b526776351968e18df83c722))
+
 ## [0.1.1](https://github.com/seuros/rogue_machines/compare/rogue_machines-v0.1.0...rogue_machines/v0.1.1) (2026-11-01)
 
 
