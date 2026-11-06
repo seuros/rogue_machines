@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/seuros/rogue_machines/compare/rogue_machines/v0.1.2...rogue_machines/v0.1.3) (2026-11-06)
+
+
+### Bug Fixes
+
+* extract arg_error and range error helpers in ffi ([ee6ccf4](https://github.com/seuros/rogue_machines/commit/ee6ccf4ef0caef9f5ef7b4496ee0ccdb633ddc1e))
+* keep test modules out of the packaged crate ([425cf81](https://github.com/seuros/rogue_machines/commit/425cf81b4e94ea2abd8de21ec74426c71338c11c))
+
 ## [0.1.2](https://github.com/seuros/rogue_machines/compare/rogue_machines/v0.1.1...rogue_machines/v0.1.2) (2026-11-01)
 
 
