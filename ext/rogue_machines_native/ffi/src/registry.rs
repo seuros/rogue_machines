@@ -8,7 +8,9 @@ use magnus::{Error, RArray, RHash, RModule, Ruby, Value, function, method, prelu
 use rogue_machines::{Decision, EXPERIMENTS, Experiment, Fault, Rogue, Slot};
 
 use crate::injection::injection;
-use crate::{LONGEST_DELAY, LONGEST_EXPERIMENT, counted, draw, duration, error, reading, share};
+use crate::{
+    LONGEST_DELAY, LONGEST_EXPERIMENT, arg_error, counted, draw, duration, error, reading, share,
+};
 
 /// The core registry, and the names standing in for its slot indices.
 #[magnus::wrap(class = "RogueMachines::Rogue", free_immediately, size)]
@@ -105,10 +107,7 @@ impl Wrapper {
                 LONGEST_EXPERIMENT,
             )?)
             .ok_or_else(|| {
-                Error::new(
-                    ruby.exception_arg_error(),
-                    "expires_in puts the expiry past the end of the clock",
-                )
+                arg_error(ruby, "expires_in puts the expiry past the end of the clock")
             })?;
         let fraction = share(ruby, given_share)?;
         let fault = fault(ruby, &named, delay)?;
@@ -254,18 +253,14 @@ fn fault(ruby: &Ruby, named: &str, delay: Option<f64>) -> Result<Fault, Error> {
         "raise" => Ok(Fault::Raise),
         "garble" => Ok(Fault::Garble),
         "delay" => {
-            let seconds = delay.ok_or_else(|| {
-                Error::new(
-                    ruby.exception_arg_error(),
-                    "a :delay fault needs delay: in seconds",
-                )
-            })?;
+            let seconds =
+                delay.ok_or_else(|| arg_error(ruby, "a :delay fault needs delay: in seconds"))?;
             Ok(Fault::Delay {
                 ns: duration(ruby, "delay", seconds, LONGEST_DELAY)?,
             })
         }
-        other => Err(Error::new(
-            ruby.exception_arg_error(),
+        other => Err(arg_error(
+            ruby,
             format!("fault must be :raise, :delay or :garble, got {other:?}"),
         )),
     }

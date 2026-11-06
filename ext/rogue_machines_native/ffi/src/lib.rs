@@ -10,6 +10,8 @@
 mod injection;
 mod registry;
 
+use std::borrow::Cow;
+use std::fmt::Display;
 use std::sync::OnceLock;
 
 use magnus::value::Opaque;
@@ -38,15 +40,15 @@ pub(crate) const LONGEST_DELAY: f64 = 5.0 * 60.0;
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(crate) fn duration(ruby: &Ruby, name: &str, seconds: f64, longest: f64) -> Result<u64, Error> {
     if !seconds.is_finite() || seconds <= 0.0 || seconds > longest {
-        return Err(Error::new(
-            ruby.exception_arg_error(),
+        return Err(arg_error(
+            ruby,
             format!("{name} must be above 0 and at most {longest} seconds, got {seconds}"),
         ));
     }
     let nanoseconds = seconds * f64::from(NS_PER_SECOND);
     if nanoseconds < 1.0 {
-        return Err(Error::new(
-            ruby.exception_arg_error(),
+        return Err(arg_error(
+            ruby,
             format!("{name} of {seconds} is below the one nanosecond resolution"),
         ));
     }
@@ -59,15 +61,9 @@ pub(crate) fn duration(ruby: &Ruby, name: &str, seconds: f64, longest: f64) -> R
 /// range: magnus would reject that with its own `RangeError`, which would
 /// leak out of a protected call site as something the gem never documents.
 pub(crate) fn reading(ruby: &Ruby, name: &str, value: Value) -> Result<u64, Error> {
-    whole(ruby, name, value)?.to_u64().map_err(|_| {
-        Error::new(
-            ruby.exception_arg_error(),
-            format!(
-                "{name} must be a non-negative Integer of at most {}",
-                u64::MAX
-            ),
-        )
-    })
+    whole(ruby, name, value)?
+        .to_u64()
+        .map_err(|_| above(ruby, name, u64::MAX))
 }
 
 /// A draw below [`PER_MILLION`].
@@ -76,14 +72,14 @@ pub(crate) fn reading(ruby: &Ruby, name: &str, value: Value) -> Result<u64, Erro
 /// `rand` returns a Float would inject on every call instead of none.
 pub(crate) fn draw(ruby: &Ruby, value: Value) -> Result<u32, Error> {
     let drawn = whole(ruby, "draw", value)?.to_u32().map_err(|_| {
-        Error::new(
-            ruby.exception_arg_error(),
+        arg_error(
+            ruby,
             format!("draw must be a non-negative Integer below {PER_MILLION}"),
         )
     })?;
     if drawn >= PER_MILLION {
-        return Err(Error::new(
-            ruby.exception_arg_error(),
+        return Err(arg_error(
+            ruby,
             format!("draw must be below {PER_MILLION}, got {drawn}"),
         ));
     }
@@ -92,49 +88,51 @@ pub(crate) fn draw(ruby: &Ruby, value: Value) -> Result<u32, Error> {
 
 /// A generation tag.
 pub(crate) fn counted(ruby: &Ruby, name: &str, value: Value) -> Result<u32, Error> {
-    whole(ruby, name, value)?.to_u32().map_err(|_| {
-        Error::new(
-            ruby.exception_arg_error(),
-            format!(
-                "{name} must be a non-negative Integer of at most {}",
-                u32::MAX
-            ),
-        )
-    })
+    whole(ruby, name, value)?
+        .to_u32()
+        .map_err(|_| above(ruby, name, u32::MAX))
+}
+
+/// Refuses an Integer that is negative or larger than `max`.
+fn above(ruby: &Ruby, name: &str, max: impl Display) -> Error {
+    arg_error(
+        ruby,
+        format!("{name} must be a non-negative Integer of at most {max}"),
+    )
 }
 
 fn whole(ruby: &Ruby, name: &str, value: Value) -> Result<Integer, Error> {
-    Integer::from_value(value).ok_or_else(|| {
-        Error::new(
-            ruby.exception_arg_error(),
-            format!("{name} must be an Integer"),
-        )
-    })
+    Integer::from_value(value).ok_or_else(|| arg_error(ruby, format!("{name} must be an Integer")))
 }
 
 /// A share of calls, rejecting one outside a whole or too small to express.
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(crate) fn share(ruby: &Ruby, given: f64) -> Result<Fraction, Error> {
     if !given.is_finite() || !(0.0..=1.0).contains(&given) {
-        return Err(Error::new(
-            ruby.exception_arg_error(),
+        return Err(arg_error(
+            ruby,
             format!("share must be between 0 and 1, got {given}"),
         ));
     }
     let millionths = given * f64::from(PER_MILLION);
     if given > 0.0 && millionths < 1.0 {
-        return Err(Error::new(
-            ruby.exception_arg_error(),
+        return Err(arg_error(
+            ruby,
             format!("share of {given} is below the one millionth resolution"),
         ));
     }
     let millionths = millionths.round() as u32;
     Fraction::new(millionths).ok_or_else(|| {
-        Error::new(
-            ruby.exception_arg_error(),
+        arg_error(
+            ruby,
             format!("share of {millionths} millionths is not a whole"),
         )
     })
+}
+
+/// An `ArgumentError` carrying `message`.
+pub(crate) fn arg_error(ruby: &Ruby, message: impl Into<Cow<'static, str>>) -> Error {
+    Error::new(ruby.exception_arg_error(), message)
 }
 
 pub(crate) fn error(ruby: &Ruby, message: String) -> Error {
