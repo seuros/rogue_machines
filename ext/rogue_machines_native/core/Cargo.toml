@@ -10,7 +10,7 @@ repository = "https://github.com/seuros/rogue_machines"
 keywords = ["fault-injection", "chaos-engineering", "resilience", "testing", "no-std"]
 categories = ["no-std", "development-tools::testing"]
 readme = "README.md"
-
+exclude = ["src/**/tests.rs", "tests/"]
 [lib]
 name = "rogue_machines"
 crate-type = ["lib"]
