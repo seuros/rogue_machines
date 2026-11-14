@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/seuros/rogue_machines/compare/rogue_machines/v0.3.0...rogue_machines/v0.3.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** require matryona-machines &gt;= 0.3 ([b92985b](https://github.com/seuros/rogue_machines/commit/b92985b2ee76787772e6d6c1e5deeffa1a039d89))
+
 ## [0.3.0](https://github.com/seuros/rogue_machines/compare/rogue_machines/v0.2.0...rogue_machines/v0.3.0) (2026-11-14)
 
 
