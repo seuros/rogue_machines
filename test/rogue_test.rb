@@ -119,6 +119,15 @@ module RogueMachines
       assert_equal before, state
     end
 
+    # Frozen is checked before any argument is read, as Ruby's own methods do.
+    def test_a_frozen_rogue_given_a_bad_argument_raises_frozen_error
+      @rogue.freeze
+
+      assert_raises(FrozenError) { @rogue.arm(:slot, :experiment) }
+      assert_raises(FrozenError) { @rogue.disarm(1.5) }
+      assert_raises(FrozenError) { @rogue.sweep(-1) }
+    end
+
     def test_instants_and_spans_are_integer_nanoseconds_in_and_out
       @rogue.arm(Slot.new(0), Experiment.new(Delay.new(2**64 - 1), Fraction::ALL, 2**64 - 1))
 

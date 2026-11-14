@@ -6,89 +6,62 @@
 //! `initialize` calls a private hook here, so a hand-built value is held to
 //! the same rule as one the binding returns.
 
-use std::sync::OnceLock;
-use std::time::Duration;
-
-use magnus::rb_sys::AsRawValue;
-use magnus::value::Opaque;
-use magnus::{
-    Error, Integer, RArray, RClass, RModule, Ruby, Symbol, TryConvert, Value, function, prelude::*,
+use magnus::{Error, RArray, RModule, Ruby, Symbol, Value, function, prelude::*};
+use matryona_machines::ruby::{
+    Bounded, Class, Registry, duration, exact_fields, integer, nanoseconds, symbol,
 };
 use rogue_machines::{Draw, Experiment, Fault, Fraction, Slot};
 
-use crate::setup_error;
-
-/// The `Data` classes, looked up once at load so that nothing after a core
-/// call has a lookup left that could raise.
+/// The `Data` classes, looked up once at load and pinned, so that nothing
+/// after a core call has a lookup left that could raise.
 pub struct Classes {
-    slot: Opaque<RClass>,
-    fraction: Opaque<RClass>,
-    draw: Opaque<RClass>,
-    delay: Opaque<RClass>,
-    experiment: Opaque<RClass>,
-    inject: Opaque<RClass>,
-    replaced: Opaque<RClass>,
-    disarmed: Opaque<RClass>,
+    slot: Class,
+    fraction: Class,
+    draw: Class,
+    delay: Class,
+    experiment: Class,
+    inject: Class,
+    replaced: Class,
+    disarmed: Class,
 }
 
-static CLASSES: OnceLock<Classes> = OnceLock::new();
+static CLASSES: Registry<Classes> = Registry::new("rogue_machines");
 
 /// The classes, or a `RuntimeError` when the extension was loaded without
 /// `rogue_machines.rb` defining them first.
 pub fn classes(ruby: &Ruby) -> Result<&'static Classes, Error> {
-    CLASSES
-        .get()
-        .ok_or_else(|| setup_error(ruby, "load rogue_machines, not the extension alone"))
-}
-
-fn type_error(ruby: &Ruby, message: String) -> Error {
-    Error::new(ruby.exception_type_error(), message)
+    CLASSES.get(ruby)
 }
 
 fn range_error(ruby: &Ruby, message: String) -> Error {
     Error::new(ruby.exception_range_error(), message)
 }
 
-/// An Integer as `T`: `TypeError` for anything else, `RangeError` outside
-/// what `T` holds.
-fn integer<T: TryConvert>(ruby: &Ruby, name: &str, value: Value) -> Result<T, Error> {
-    if Integer::from_value(value).is_none() {
-        return Err(type_error(ruby, format!("{name} must be an Integer")));
-    }
-    T::try_convert(value).map_err(|_| range_error(ruby, format!("{name} is out of range")))
-}
-
-/// Integer nanoseconds as a `Duration`, `0..=2**64-1`.
-pub fn nanos(ruby: &Ruby, name: &str, value: Value) -> Result<Duration, Error> {
-    integer::<u64>(ruby, name, value).map(Duration::from_nanos)
-}
-
-/// `value` when its class is exactly `class`, `TypeError` otherwise: a
-/// subclass's constant leaks past the seal, so `is_a?` is not enough. The
-/// classes are compared by identity, which no Ruby method can fake; the
-/// fields are then rebuilt through the core's constructors, which
+/// The `N` fields of `value` when it is an instance of exactly `class`,
+/// `TypeError` with `message` otherwise: a subclass's constant leaks past the
+/// seal, so `is_a?` is not enough, and an opened singleton class changes
+/// nothing. The fields are read from the struct itself, so a redefined reader
+/// is never called, then rebuilt through the core's constructors, which
 /// `Marshal.load` skipped.
-fn instance(ruby: &Ruby, value: Value, class: Opaque<RClass>, name: &str) -> Result<Value, Error> {
-    if value.class().as_raw() == ruby.get_inner(class).as_raw() {
-        Ok(value)
-    } else {
-        Err(type_error(
-            ruby,
-            format!("expected a RogueMachines::{name}"),
-        ))
-    }
+fn fields<const N: usize>(
+    ruby: &Ruby,
+    value: Value,
+    class: Class,
+    message: &'static str,
+) -> Result<[Value; N], Error> {
+    exact_fields(ruby, value, class.get(ruby), message)
 }
 
 /// An Integer the core's constructor `build` accepts: `TypeError` for a
 /// non-Integer, `RangeError` naming `rule` for anything `build` rejects.
-fn constructed<N: TryConvert, T>(
+fn constructed<N: Bounded, T>(
     ruby: &Ruby,
     name: &str,
     value: Value,
     build: impl FnOnce(N) -> Option<T>,
     rule: impl FnOnce() -> String,
 ) -> Result<T, Error> {
-    build(integer::<N>(ruby, name, value)?).ok_or_else(|| range_error(ruby, rule()))
+    build(integer::<N>(value, name)?).ok_or_else(|| range_error(ruby, rule()))
 }
 
 fn slot_index(ruby: &Ruby, index: Value) -> Result<Slot, Error> {
@@ -111,19 +84,30 @@ fn draw_millionths(ruby: &Ruby, millionths: Value) -> Result<Draw, Error> {
 
 /// The core `Slot` of a `RogueMachines::Slot`.
 pub fn slot(ruby: &Ruby, value: Value) -> Result<Slot, Error> {
-    let value = instance(ruby, value, classes(ruby)?.slot, "Slot")?;
-    slot_index(ruby, value.funcall("index", ())?)
+    let [index] = fields(
+        ruby,
+        value,
+        classes(ruby)?.slot,
+        "expected a RogueMachines::Slot",
+    )?;
+    slot_index(ruby, index)
 }
 
 /// The core `Draw` of a `RogueMachines::Draw`.
 pub fn draw(ruby: &Ruby, value: Value) -> Result<Draw, Error> {
-    let value = instance(ruby, value, classes(ruby)?.draw, "Draw")?;
-    draw_millionths(ruby, value.funcall("millionths", ())?)
+    let [millionths] = fields(
+        ruby,
+        value,
+        classes(ruby)?.draw,
+        "expected a RogueMachines::Draw",
+    )?;
+    draw_millionths(ruby, millionths)
 }
 
 fn fraction(ruby: &Ruby, value: Value) -> Result<Fraction, Error> {
-    let value = instance(ruby, value, classes(ruby)?.fraction, "Fraction")?;
-    fraction_millionths(ruby, value.funcall("millionths", ())?)
+    let message = "expected a RogueMachines::Fraction";
+    let [millionths] = fields(ruby, value, classes(ruby)?.fraction, message)?;
+    fraction_millionths(ruby, millionths)
 }
 
 /// `:raise`, `:garble` or a `RogueMachines::Delay`.
@@ -138,37 +122,31 @@ fn fault(ruby: &Ruby, value: Value) -> Result<Fault, Error> {
             )),
         };
     }
-    let value = instance(ruby, value, classes(ruby)?.delay, "Delay")?;
-    Ok(Fault::Delay(nanos(
+    let [span] = fields(
         ruby,
-        "duration",
-        value.funcall("duration", ())?,
-    )?))
+        value,
+        classes(ruby)?.delay,
+        "expected a RogueMachines::Delay",
+    )?;
+    Ok(Fault::Delay(duration(span, "duration")?))
 }
 
 /// The core `Experiment` of a `RogueMachines::Experiment`.
 pub fn experiment(ruby: &Ruby, value: Value) -> Result<Experiment, Error> {
-    let value = instance(ruby, value, classes(ruby)?.experiment, "Experiment")?;
+    let message = "expected a RogueMachines::Experiment";
+    let [given_fault, given_fraction, expires_at] =
+        fields(ruby, value, classes(ruby)?.experiment, message)?;
     Ok(Experiment::new(
-        fault(ruby, value.funcall("fault", ())?)?,
-        fraction(ruby, value.funcall("fraction", ())?)?,
-        nanos(ruby, "expires_at", value.funcall("expires_at", ())?)?,
+        fault(ruby, given_fault)?,
+        fraction(ruby, given_fraction)?,
+        duration(expires_at, "expires_at")?,
     ))
-}
-
-/// A `Duration` the core returned, as Integer nanoseconds.
-pub fn nanos_value(ruby: &Ruby, duration: Duration) -> Value {
-    ruby.integer_from_u128(duration.as_nanos()).as_value()
 }
 
 impl Classes {
     /// `Data.new` with positional fields, which `initialize` validates.
-    fn build(
-        ruby: &Ruby,
-        class: Opaque<RClass>,
-        fields: impl magnus::ArgList,
-    ) -> Result<Value, Error> {
-        ruby.get_inner(class).funcall("new", fields)
+    fn build(ruby: &Ruby, class: Class, fields: impl magnus::ArgList) -> Result<Value, Error> {
+        class.get(ruby).funcall("new", fields)
     }
 
     pub fn slot(&self, ruby: &Ruby, slot: Slot) -> Result<Value, Error> {
@@ -177,16 +155,16 @@ impl Classes {
 
     pub fn fault(&self, ruby: &Ruby, fault: Fault) -> Result<Value, Error> {
         match fault {
-            Fault::Raise => Ok(ruby.to_symbol("raise").as_value()),
-            Fault::Garble => Ok(ruby.to_symbol("garble").as_value()),
-            Fault::Delay(duration) => Self::build(ruby, self.delay, (nanos_value(ruby, duration),)),
+            Fault::Raise => Ok(symbol(ruby, "raise").as_value()),
+            Fault::Garble => Ok(symbol(ruby, "garble").as_value()),
+            Fault::Delay(span) => Self::build(ruby, self.delay, (nanoseconds(ruby, span),)),
         }
     }
 
     pub fn experiment(&self, ruby: &Ruby, experiment: Experiment) -> Result<Value, Error> {
         let fraction = Self::build(ruby, self.fraction, (experiment.fraction.millionths(),))?;
         let fault = self.fault(ruby, experiment.fault)?;
-        let expires_at = nanos_value(ruby, experiment.expires_at);
+        let expires_at = nanoseconds(ruby, experiment.expires_at);
         Self::build(ruby, self.experiment, (fault, fraction, expires_at))
     }
 
@@ -220,7 +198,7 @@ fn checked_draw(ruby: &Ruby, millionths: Value) -> Result<u32, Error> {
 
 /// Integer nanoseconds as a `Duration` holds them.
 fn checked_nanos(ruby: &Ruby, name: &str, value: Value) -> Result<Value, Error> {
-    nanos(ruby, name, value).map(|duration| nanos_value(ruby, duration))
+    duration(value, name).map(|span| nanoseconds(ruby, span).as_value())
 }
 
 /// `Delay.new`: its duration.
@@ -253,7 +231,7 @@ fn checked_held(ruby: &Ruby, given: Value) -> Result<Value, Error> {
 
 /// `Experiment#spent?`: the core's `Experiment::spent`.
 fn spent(ruby: &Ruby, given: Value, now: Value) -> Result<bool, Error> {
-    Ok(experiment(ruby, given)?.spent(nanos(ruby, "now", now)?))
+    Ok(experiment(ruby, given)?.spent(duration(now, "now")?))
 }
 
 /// `Fraction#covers?`: the core's `Fraction::covers`.
@@ -261,29 +239,19 @@ fn covers(ruby: &Ruby, given: Value, given_draw: Value) -> Result<bool, Error> {
     Ok(fraction(ruby, given)?.covers(draw(ruby, given_draw)?))
 }
 
-fn class(ruby: &Ruby, module: RModule, name: &str) -> Result<Opaque<RClass>, Error> {
-    let class: RClass = module
-        .const_get(name)
-        .map_err(|_| setup_error(ruby, "load rogue_machines, not the extension alone"))?;
-    // Held past this call: pinned so GC compaction cannot move it.
-    ruby.gc_register_mark_object(class);
-    Ok(class.into())
-}
-
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+    let class = |name| Class::resolve(ruby, module, name);
     let classes = Classes {
-        slot: class(ruby, module, "Slot")?,
-        fraction: class(ruby, module, "Fraction")?,
-        draw: class(ruby, module, "Draw")?,
-        delay: class(ruby, module, "Delay")?,
-        experiment: class(ruby, module, "Experiment")?,
-        inject: class(ruby, module, "Inject")?,
-        replaced: class(ruby, module, "Replaced")?,
-        disarmed: class(ruby, module, "Disarmed")?,
+        slot: class("Slot")?,
+        fraction: class("Fraction")?,
+        draw: class("Draw")?,
+        delay: class("Delay")?,
+        experiment: class("Experiment")?,
+        inject: class("Inject")?,
+        replaced: class("Replaced")?,
+        disarmed: class("Disarmed")?,
     };
-    CLASSES
-        .set(classes)
-        .map_err(|_| setup_error(ruby, "the extension was loaded twice"))?;
+    CLASSES.set(ruby, classes)?;
     module.define_singleton_method("__slot", function!(checked_slot, 1))?;
     module.define_singleton_method("__fraction", function!(checked_fraction, 1))?;
     module.define_singleton_method("__draw", function!(checked_draw, 1))?;

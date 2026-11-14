@@ -1,5 +1,7 @@
 use core::time::Duration;
 
+use matryona_machines::testing::unchanged;
+
 use crate::test_support::{at, draw, fraction, raising, slot};
 use crate::{
     Arming, Decision, Disarming, EXPERIMENTS, Experiment, Fault, Fraction, PER_MILLION, Rogue,
@@ -43,10 +45,10 @@ fn arming_says_what_the_slot_held_before_expired_or_not() {
 fn arming_the_identical_experiment_again_is_an_honoured_repeat_that_changes_nothing() {
     let mut rogue = Rogue::new();
     assert_eq!(rogue.arm(slot(3), raising(at(100))), Arming::Armed);
-    let before = rogue.clone();
-
-    assert_eq!(rogue.arm(slot(3), raising(at(100))), Arming::AlreadyArmed);
-    assert_eq!(rogue, before);
+    assert_eq!(
+        unchanged(&mut rogue, |r| r.arm(slot(3), raising(at(100)))),
+        Arming::AlreadyArmed
+    );
 }
 
 #[test]
@@ -117,9 +119,10 @@ fn disarming_says_what_the_slot_held_and_a_repeat_changes_nothing() {
     );
     assert_eq!(rogue.armed_count(), 1);
 
-    let before = rogue.clone();
-    assert_eq!(rogue.disarm(slot(0)), Disarming::NotArmed);
-    assert_eq!(rogue, before);
+    assert_eq!(
+        unchanged(&mut rogue, |r| r.disarm(slot(0))),
+        Disarming::NotArmed
+    );
 
     // No instant is taken: the slot is emptied whatever the clock says, and
     // the caller judges the experiment it gets back, expired or not.
@@ -149,13 +152,12 @@ fn disarming_everything_clears_every_slot_and_counts_them() {
 fn a_query_judges_expiry_against_its_own_instant_and_changes_nothing() {
     let mut rogue = Rogue::new();
     assert_eq!(rogue.arm(slot(7), raising(at(100))), Arming::Armed);
-    let before = rogue.clone();
 
+    // The queries take `&self`: the compiler proves they change nothing.
     assert_eq!(rogue.decide(slot(7), at(100), draw(0)), Decision::Pass);
     assert_eq!(rogue.active(slot(7), at(100)), None);
     assert_eq!(rogue.live_count(at(100)), 0);
     // Expired, and still holding its slot: only a sweep gives it back.
-    assert_eq!(rogue, before);
     assert!(rogue.any_armed());
     assert_eq!(rogue.armed_count(), 1);
     assert_eq!(rogue.experiment(slot(7)), Some(raising(at(100))));
@@ -172,9 +174,7 @@ fn a_sweep_retires_what_expired_and_a_backwards_clock_cannot_revive_it() {
     let mut rogue = Rogue::new();
     assert_eq!(rogue.arm(slot(7), raising(at(100))), Arming::Armed);
     assert_eq!(rogue.arm(slot(8), raising(at(200))), Arming::Armed);
-    let before = rogue.clone();
-    assert_eq!(rogue.sweep(at(99)), 0);
-    assert_eq!(rogue, before);
+    assert_eq!(unchanged(&mut rogue, |r| r.sweep(at(99))), 0);
 
     assert_eq!(rogue.sweep(at(100)), 1);
 

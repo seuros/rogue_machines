@@ -53,6 +53,17 @@ module RogueMachines
       assert_equal 0, @rogue.armed_count
     end
 
+    # A singleton class opened on a genuine value does not change what it is.
+    def test_an_opened_singleton_class_is_still_the_gems_value
+      slot = Slot.new(0).tap(&:singleton_class)
+      fraction = Fraction::ALL.dup.tap(&:singleton_class)
+      delay = Delay.new(5).tap(&:singleton_class)
+      experiment = Experiment.new(delay, fraction, 100).tap(&:singleton_class)
+
+      assert_equal :armed, @rogue.arm(slot, experiment)
+      assert_equal Inject.new(Delay.new(5)), @rogue.decide(slot, 0, Draw.new(0).tap(&:singleton_class))
+    end
+
     def test_a_marshal_edited_value_is_revalidated_into_a_range_error
       slot = Marshal.load(Marshal.dump(Slot.new(1)).sub("i\x06".b, "i\x02\xFF\x00".b))
       fraction = Marshal.load(Marshal.dump(Fraction.new(5)).sub("i\x0A".b, "i\x04\x40\x42\x0F\x01".b))
@@ -67,22 +78,27 @@ module RogueMachines
       assert_equal 0, @rogue.armed_count
     end
 
-    # The slot is read before the Rogue is: a `Slot#index` that re-enters the
-    # Rogue is an ordinary call, never an uncatchable fatal.
-    def test_a_reader_whose_argument_re_enters_the_rogue_is_not_fatal
+    # Fields are read from the struct itself: a redefined reader, one that
+    # would lie or re-enter the Rogue alike, is never called.
+    def test_a_redefined_reader_is_ignored
       @rogue.arm(Slot.new(0), raising(100))
       rogue = @rogue
-      slot = Slot.new(0)
-      slot_index = Slot.instance_method(:index)
-      Slot.define_method(:index) do
-        rogue.disarm_all if equal?(slot)
-        slot_index.bind_call(self)
+      lying = lambda do |name|
+        lambda do
+          rogue.disarm_all
+          raise "#{name} reader called"
+        end
       end
-
-      assert_nil @rogue.experiment(slot)
-      assert_equal 0, @rogue.armed_count
-    ensure
-      Slot.define_method(:index, slot_index)
+      readers = { Slot => %i[index], Draw => %i[millionths], Fraction => %i[millionths],
+                  Delay => %i[duration], Experiment => %i[fault fraction expires_at] }
+      redefined(readers, lying) do
+        assert_equal raising(100), @rogue.experiment(Slot.new(0))
+        assert_equal Inject.new(:raise), @rogue.decide(Slot.new(0), 0, Draw.new(0))
+        assert_equal :armed, @rogue.arm(Slot.new(1), Experiment.new(Delay.new(5), Fraction.new(7), 100))
+        assert Fraction::ALL.covers?(Draw.new(0))
+        refute raising(100).spent?(99)
+      end
+      assert_equal 2, @rogue.armed_count
     end
 
     def test_an_answer_whose_new_raises_applies_nothing
@@ -131,6 +147,24 @@ module RogueMachines
     end
 
     private
+
+    # Runs the block with every listed reader replaced by `body.(name)`.
+    def redefined(readers, body)
+      readers.each do |klass, names|
+        names.each do |name|
+          klass.alias_method(:"__real_#{name}", name)
+          klass.define_method(name, &body.(name))
+        end
+      end
+      yield
+    ensure
+      readers.each do |klass, names|
+        names.each do |name|
+          klass.alias_method(name, :"__real_#{name}")
+          klass.remove_method(:"__real_#{name}")
+        end
+      end
+    end
 
     # Runs the block with `answer.new` calling `side` first.
     def answering(answer, side)

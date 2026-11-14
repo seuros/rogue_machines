@@ -2,22 +2,17 @@
 
 use core::time::Duration;
 
+use matryona_machines::testing::{XorShift64, unchanged};
+
 use crate::test_support::{at, draw, fraction, slot};
 use crate::{Arming, Decision, Disarming, EXPERIMENTS, Experiment, Fault, PER_MILLION, Rogue};
 
-/// xorshift64*: deterministic, so a failure replays.
-struct Random(u64);
+/// Draws on matryona's xorshift: deterministic, so a failure replays.
+struct Random(XorShift64);
 
 impl Random {
-    const fn next(&mut self) -> u64 {
-        self.0 ^= self.0 >> 12;
-        self.0 ^= self.0 << 25;
-        self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn below(&mut self, bound: u64) -> u64 {
-        self.next() % bound
+    const fn below(&mut self, bound: u64) -> u64 {
+        self.0.below(bound)
     }
 
     fn index(&mut self) -> usize {
@@ -73,37 +68,35 @@ fn agree(rogue: &Rogue, model: &Model, now: Duration, random: &mut Random) {
 
 fn arm(rogue: &mut Rogue, model: &mut Model, random: &mut Random) {
     let (index, experiment) = (random.index(), random.experiment());
-    let before = rogue.clone();
-    let answer = rogue.arm(slot(index), experiment);
+    let arming = |r: &mut Rogue| r.arm(slot(index), experiment);
     match model[index] {
-        None => assert_eq!(answer, Arming::Armed),
+        None => assert_eq!(arming(rogue), Arming::Armed),
         Some(previous) if previous == experiment => {
-            assert_eq!(answer, Arming::AlreadyArmed);
-            assert_eq!(*rogue, before);
+            assert_eq!(unchanged(rogue, arming), Arming::AlreadyArmed);
         }
-        Some(previous) => assert_eq!(answer, Arming::Replaced(previous)),
+        Some(previous) => assert_eq!(arming(rogue), Arming::Replaced(previous)),
     }
     model[index] = Some(experiment);
 }
 
 fn disarm(rogue: &mut Rogue, model: &mut Model, random: &mut Random) {
     let index = random.index();
-    let before = rogue.clone();
-    let answer = rogue.disarm(slot(index));
     if let Some(previous) = model[index].take() {
-        assert_eq!(answer, Disarming::Disarmed(previous));
+        assert_eq!(rogue.disarm(slot(index)), Disarming::Disarmed(previous));
     } else {
-        assert_eq!(answer, Disarming::NotArmed);
-        assert_eq!(*rogue, before);
+        assert_eq!(
+            unchanged(rogue, |r| r.disarm(slot(index))),
+            Disarming::NotArmed
+        );
     }
 }
 
 fn disarm_all(rogue: &mut Rogue, model: &mut Model) {
     let held = model.iter().flatten().count();
-    let before = rogue.clone();
-    assert_eq!(rogue.disarm_all() as usize, held);
     if held == 0 {
-        assert_eq!(*rogue, before);
+        assert_eq!(unchanged(rogue, Rogue::disarm_all), 0);
+    } else {
+        assert_eq!(rogue.disarm_all() as usize, held);
     }
     *model = [None; EXPERIMENTS];
 }
@@ -116,17 +109,17 @@ fn sweep(rogue: &mut Rogue, model: &mut Model, now: Duration) {
             expired += 1;
         }
     }
-    let before = rogue.clone();
-    assert_eq!(rogue.sweep(now), expired);
     if expired == 0 {
-        assert_eq!(*rogue, before);
+        assert_eq!(unchanged(rogue, |r| r.sweep(now)), 0);
+    } else {
+        assert_eq!(rogue.sweep(now), expired);
     }
 }
 
 #[test]
 fn a_random_run_matches_the_model_and_no_repeat_or_query_changes_anything() {
     for seed in 1..=24_u64 {
-        let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let mut random = Random(XorShift64::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)));
         let mut rogue = Rogue::new();
         let mut model: Model = [None; EXPERIMENTS];
         for _ in 0..4_000 {
@@ -138,9 +131,8 @@ fn a_random_run_matches_the_model_and_no_repeat_or_query_changes_anything() {
                 12 => disarm_all(&mut rogue, &mut model),
                 _ => sweep(&mut rogue, &mut model, now),
             }
-            let before = rogue.clone();
+            // `agree` only asks `&self` queries: nothing can change.
             agree(&rogue, &model, now, &mut random);
-            assert_eq!(rogue, before);
         }
     }
 }

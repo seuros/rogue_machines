@@ -128,6 +128,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "matryona-machines"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39ad8da938bf6f8b71d39da51cff79a602a948665a542f575db7f4cb63877215"
+dependencies = [
+ "magnus",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -229,12 +238,16 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rogue-machines"
 version = "0.3.0"
+dependencies = [
+ "matryona-machines",
+]
 
 [[package]]
 name = "rogue_machines_native"
 version = "0.1.3"
 dependencies = [
  "magnus",
+ "matryona-machines",
  "rb-sys",
  "rogue-machines",
 ]
