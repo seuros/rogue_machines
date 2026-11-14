@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/rogue_machines/compare/rogue_machines/v0.3.1...rogue_machines/v0.4.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona 0.4 symbol_or_fields for faults, naming what was received
+
+### Features
+
+* adopt matryona 0.4 symbol_or_fields for faults, naming what was received ([29d07fe](https://github.com/seuros/rogue_machines/commit/29d07fe671cf3f00c8ff284f3a03dcaab0f0176e))
+
 ## [0.3.1](https://github.com/seuros/rogue_machines/compare/rogue_machines/v0.3.0...rogue_machines/v0.3.1) (2026-11-14)
 
 
