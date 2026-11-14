@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/seuros/rogue_machines/compare/rogue_machines/v0.2.0...rogue_machines/v0.3.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona-machines 0.2: struct-only field reads, caret rb-sys, missing_docs
+
+### Features
+
+* adopt matryona-machines 0.2: struct-only field reads, caret rb-sys, missing_docs ([af562d6](https://github.com/seuros/rogue_machines/commit/af562d60cde84679fc6b8bce9eedb4af3559a0b4))
+
 ## [0.2.0](https://github.com/seuros/rogue_machines/compare/rogue_machines/v0.1.3...rogue_machines/v0.2.0) (2026-11-14)
 
 
