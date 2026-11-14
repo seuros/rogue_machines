@@ -53,6 +53,14 @@ module RogueMachines
       assert_raises(RangeError) { Experiment.new(:raise, Fraction::ALL, 2**64) }
     end
 
+    def test_a_refused_fault_names_what_it_got
+      symbol = assert_raises(RangeError) { Inject.new(:delay) }
+      other = assert_raises(TypeError) { Inject.new(5) }
+
+      assert_equal 'a fault is :raise, :garble or a Delay, got :delay', symbol.message
+      assert_equal 'a fault is :raise, :garble or a Delay, got Integer', other.message
+    end
+
     def test_the_answer_values_hold_only_what_the_core_could_answer
       experiment = Experiment.new(:garble, Fraction::NONE, 1)
 

@@ -8,7 +8,8 @@
 
 use magnus::{Error, RArray, RModule, Ruby, Symbol, Value, function, prelude::*};
 use matryona_machines::ruby::{
-    Bounded, Class, Registry, duration, exact_fields, integer, nanoseconds, symbol,
+    Bounded, Choice, Class, Registry, SymbolNames, duration, exact_fields, integer, nanoseconds,
+    symbol_or_fields_with,
 };
 use rogue_machines::{Draw, Experiment, Fault, Fraction, Slot};
 
@@ -110,25 +111,30 @@ fn fraction(ruby: &Ruby, value: Value) -> Result<Fraction, Error> {
     fraction_millionths(ruby, millionths)
 }
 
-/// `:raise`, `:garble` or a `RogueMachines::Delay`.
-fn fault(ruby: &Ruby, value: Value) -> Result<Fault, Error> {
-    if let Some(named) = Symbol::from_value(value) {
-        return match named.name()?.as_ref() {
-            "raise" => Ok(Fault::Raise),
-            "garble" => Ok(Fault::Garble),
-            other => Err(range_error(
-                ruby,
-                format!("a fault is :raise, :garble or a Delay, got :{other}"),
-            )),
-        };
+matryona_machines::symbols! {
+    /// A fault as Ruby holds it: `:raise`, `:garble`, or a `Delay`.
+    Faults for Fault as "a fault" => names_only {
+        Raise => "raise",
+        Delay(..) => "delay",
+        Garble => "garble",
     }
-    let [span] = fields(
-        ruby,
-        value,
-        classes(ruby)?.delay,
-        "expected a RogueMachines::Delay",
-    )?;
-    Ok(Fault::Delay(duration(span, "duration")?))
+}
+
+/// `:raise`, `:garble` or a `RogueMachines::Delay`: `RangeError` for any
+/// other Symbol, `TypeError` for anything else, each naming what it got.
+fn fault(ruby: &Ruby, value: Value) -> Result<Fault, Error> {
+    let delay = classes(ruby)?.delay.get(ruby);
+    let message = || {
+        let got = match Symbol::from_value(value).map(Symbol::name) {
+            Some(Ok(name)) => format!(":{name}"),
+            _ => value.class().to_string(),
+        };
+        format!("a fault is :raise, :garble or a Delay, got {got}")
+    };
+    match symbol_or_fields_with(ruby, value, Faults, &[delay], message)? {
+        Choice::Symbol(fault) => Ok(fault),
+        Choice::Struct(_, [span]) => Ok(Fault::Delay(duration(span, "duration")?)),
+    }
 }
 
 /// The core `Experiment` of a `RogueMachines::Experiment`.
@@ -155,8 +161,7 @@ impl Classes {
 
     pub fn fault(&self, ruby: &Ruby, fault: Fault) -> Result<Value, Error> {
         match fault {
-            Fault::Raise => Ok(symbol(ruby, "raise").as_value()),
-            Fault::Garble => Ok(symbol(ruby, "garble").as_value()),
+            Fault::Raise | Fault::Garble => Ok(Faults::symbol(ruby, &fault).as_value()),
             Fault::Delay(span) => Self::build(ruby, self.delay, (nanoseconds(ruby, span),)),
         }
     }
