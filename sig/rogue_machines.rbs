@@ -1,37 +1,159 @@
 # Fault injection: making a dependency fail, stall or lie on purpose.
+#
+# Two layers: `Rogue` and the Data values mirror the core one for one; the
+# module functions are a process-wide runtime on top of one Rogue. Every
+# value validates through the core at construction: TypeError for the wrong
+# type, RangeError for a value the core's constructor rejects. Time is Integer
+# nanoseconds throughout.
 module RogueMachines
   VERSION: String
 
-  # Nanoseconds in a second.
-  NS_PER_SECOND: Integer
-
-  # Millionths in a whole, the unit a share is held in.
+  # Millionths in a whole, the unit a Fraction and a Draw are held in.
   PER_MILLION: Integer
 
-  # Experiments a process can arm at once, the width of the armed mask.
+  # Slots a Rogue holds, the width of the armed mask.
   EXPERIMENTS: Integer
 
-  # Attempts at one consistent reading before giving up on a clock being
-  # replaced faster than it can be read.
+  # Longest `expires_in` the runtime arms, in nanoseconds: a day.
+  LONGEST_EXPERIMENT: Integer
+
+  # Longest Delay the runtime arms, in nanoseconds: five minutes.
+  LONGEST_DELAY: Integer
+
+  # Attempts at a reading against the clock still installed once the
+  # runtime's lock is held.
   READINGS: Integer
 
   class Error < StandardError
   end
 
-  # Raised by a `:raise` fault in place of the real call.
+  # Raised by a :raise fault in place of the real call.
   class Injected < Error
   end
 
-  # The fault to perform for one call.
-  class Injection < ::Data
-    # `:raise`, `:delay` or `:garble`.
-    attr_reader fault: Symbol
-
-    # How long a `:delay` waits, and zero for the others.
-    attr_reader delay_ns: Integer
+  # The core's `Slot`: an index in 0...EXPERIMENTS the caller picks. Not an
+  # issued id.
+  class Slot < ::Data
+    attr_reader index: Integer
+    def self.new: (Integer index) -> Slot
+                | (index: Integer) -> Slot
   end
 
-  # Anything that reports monotonic nanoseconds.
+  # The core's `Fraction`: 0..PER_MILLION millionths.
+  class Fraction < ::Data
+    NONE: Fraction
+    ALL: Fraction
+    attr_reader millionths: Integer
+    def self.new: (Integer millionths) -> Fraction
+                | (millionths: Integer) -> Fraction
+    # Whether `draw` falls in this share: `draw.millionths < millionths`.
+    def covers?: (Draw draw) -> bool
+  end
+
+  # The core's `Draw`: 0...PER_MILLION millionths.
+  class Draw < ::Data
+    attr_reader millionths: Integer
+    def self.new: (Integer millionths) -> Draw
+                | (millionths: Integer) -> Draw
+  end
+
+  # The core's `Fault::Delay`: `duration` Integer nanoseconds, 0..2**64-1.
+  class Delay < ::Data
+    attr_reader duration: Integer
+    def self.new: (Integer duration) -> Delay
+                | (duration: Integer) -> Delay
+  end
+
+  # The core's `Fault`: unit variants as symbols, the tuple variant as Delay.
+  type fault = :raise | :garble | Delay
+
+  # The core's `Experiment`. `expires_at` is Integer nanoseconds, 0..2**64-1.
+  class Experiment < ::Data
+    attr_reader fault: fault
+    attr_reader fraction: Fraction
+    attr_reader expires_at: Integer
+    def self.new: (fault fault, Fraction fraction, Integer expires_at) -> Experiment
+                | (fault: fault, fraction: Fraction, expires_at: Integer) -> Experiment
+    # Whether this has expired by `now`: `now >= expires_at`.
+    def spent?: (Integer now) -> bool
+  end
+
+  # The core's `Decision::Inject`.
+  class Inject < ::Data
+    attr_reader fault: fault
+    def self.new: (fault fault) -> Inject
+                | (fault: fault) -> Inject
+  end
+
+  # The core's `Arming::Replaced`: what the slot held before, expired or not.
+  class Replaced < ::Data
+    attr_reader experiment: Experiment
+    def self.new: (Experiment experiment) -> Replaced
+                | (experiment: Experiment) -> Replaced
+  end
+
+  # The core's `Disarming::Disarmed`: what the slot held, expired or not.
+  class Disarmed < ::Data
+    attr_reader experiment: Experiment
+    def self.new: (Experiment experiment) -> Disarmed
+                | (experiment: Experiment) -> Disarmed
+  end
+
+  type arming = :armed | Replaced | :already_armed
+  type disarming = Disarmed | :not_armed
+
+  # The core's `Rogue`. Nothing refuses. Queries judge expiry against the
+  # instant they are given and change nothing; only `sweep` empties expired
+  # slots. Mutating methods raise FrozenError on a frozen Rogue, and every
+  # method raises before changing anything when an argument is malformed.
+  class Rogue
+    def self.new: () -> Rogue
+
+    # Honoured: :armed (slot was empty), Replaced (it held another
+    # experiment), :already_armed (it holds exactly this one; unchanged).
+    def arm: (Slot slot, Experiment experiment) -> arming
+
+    # Honoured: Disarmed (what it held), :not_armed (unchanged).
+    def disarm: (Slot slot) -> disarming
+
+    # Slots emptied, expired or not; 0 is unchanged.
+    def disarm_all: () -> Integer
+
+    # Slots emptied because expired by `now`; 0 is unchanged.
+    def sweep: (Integer now) -> Integer
+
+    # Whether any slot holds an experiment, expired or not.
+    def any_armed?: () -> bool
+
+    # Slots holding an experiment, expired or not.
+    def armed_count: () -> Integer
+
+    # Slots holding an experiment live at `now`.
+    def live_count: (Integer now) -> Integer
+
+    # The lowest empty slot, nil when all are held.
+    def vacant: () -> Slot?
+
+    # What `slot` holds, expired or not.
+    def experiment: (Slot slot) -> Experiment?
+
+    # What `slot` holds if live at `now`.
+    def active: (Slot slot, Integer now) -> Experiment?
+
+    # Inject when `slot` holds an experiment live at `now` whose share covers
+    # `draw`, else :pass.
+    def decide: (Slot slot, Integer now, Draw draw) -> (Inject | :pass)
+
+    # An unfrozen copy holding the same experiments.
+    def dup: () -> Rogue
+
+    # A copy, frozen when this is unless `freeze:` says otherwise.
+    def clone: (?freeze: bool?) -> Rogue
+
+    def inspect: () -> String
+  end
+
+  # Anything that reports monotonic Integer nanoseconds.
   interface _Clock
     def now_ns: () -> Integer
   end
@@ -41,106 +163,47 @@ module RogueMachines
     def rand: (Integer bound) -> Integer
   end
 
-  # The experiments a process is running, by name. Reach it through the module.
-  class Rogue
-    def self.new: () -> instance
-
-    # Whether any experiment is armed as of the last sweep, which is the whole
-    # of the decision a disarmed process takes. A sweep happens on every
-    # `decide` and every `armed`, so this trails an expiry by one call.
-    def any_armed?: () -> bool
-
-    # Sweeps expired experiments at `now_ns`, then counts what is left.
-    # Reports 0 without sweeping for a superseded generation. Every seam
-    # taking a reading refuses a Float rather than truncating it.
-    def armed_count: (Integer now_ns, Integer generation) -> Integer
-
-    # Arms `name`, replacing any experiment already there. Raises
-    # `ArgumentError` for an unknown fault, a share outside a whole or below
-    # one millionth, a duration that is non-positive, below a nanosecond or
-    # longer than the cap, a `now_ns` that is not an Integer or is outside the
-    # range, or a `:delay`
-    # with no `delay:`. Raises `Error` when every slot is taken. Nothing is
-    # armed and no slot is taken when it raises.
-    def arm: (String name, fault: String, share: Float, expires_in: Float,
-              now_ns: Integer, generation: Integer, ?delay: Float) -> void
-
-    # Reports whether `name` was still running, which an experiment that
-    # expired on its own is not.
-    def disarm: (String name, Integer now_ns, Integer generation) -> bool
-
-    def disarm_all: () -> void
-
-    # Which clock the armed expiries were computed against. Every reading is
-    # only meaningful for one of these, and a call carrying another one is
-    # refused rather than acted on, since sweeping is destructive.
-    def generation: () -> Integer
-
-    # Disarms everything and starts a generation, retiring readings already
-    # taken against the outgoing clock. Returns the new generation.
-    def invalidate: () -> Integer
-
-    # The names still running at `now_ns`, in no particular order, and none
-    # for a superseded generation.
-    def armed: (Integer now_ns, Integer generation) -> Array[String]
-
-    # The fault to perform, or `nil` to make the real call. Raises
-    # `ArgumentError` for a `draw` or `now_ns` that is not an Integer, is
-    # outside its range, or is a `draw` at or above `PER_MILLION`. A Float is
-    # refused rather than truncated, because a truncated draw becomes 0,
-    # which every share covers.
-    def decide: (String name, Integer now_ns, Integer draw, Integer generation) -> Injection?
-
-    def inspect: () -> String
-  end
-
-  # Delegates to `DeadlineMachines.clock` when unset, rather than memoising
-  # it, so replacing that clock moves every expiry with it.
+  # Delegates to `DeadlineMachines.clock` when unset.
   def self.clock: () -> _Clock
 
-  # Disarms everything first: an armed expiry was computed against the
-  # outgoing clock and is not meaningful against another one.
+  # Disarms everything first: an armed expiry is not meaningful against
+  # another clock.
   def self.clock=: (_Clock?) -> void
   def self.random: () -> _Random
   def self.random=: (_Random?) -> void
-    # The registry itself. Reach for the module methods instead: arming
-    # through this bypasses the substitute a `:garble` returns, and freezing
-    # it does not prevent arming, since the native side holds its own state.
-  def self.registry: () -> Rogue
 
-  # Arms an experiment under `name`. `expires_in` counts from now and is
-  # required, so no experiment outlives the person who armed it.
-  #
-  # Raises `ArgumentError` for a blank name, a name that is neither ASCII nor
-  # valid UTF-8, or any argument the registry refuses. Raises `Error` when
-  # every slot is taken, when the clock was replaced faster than a reading
-  # could be taken, and when the clock returned something that is not a
-  # non-negative Integer of nanoseconds.
-  #
-  # `share`, `expires_in` and `delay` go through `Float()`, so a String that
-  # parses as a number is accepted, one that does not raises `ArgumentError`,
-  # and a value with no numeric conversion at all raises `TypeError`.
-  def self.arm: (Symbol | String name, fault: Symbol | String, share: Numeric | String,
-                 expires_in: Numeric | String, ?delay: (Numeric | String)?,
-                 ?garbled: untyped) -> (Symbol | String)
+  # A frozen copy of the runtime's Rogue, taken under the lock, for reading.
+  def self.rogue: () -> Rogue
 
-  def self.disarm: (Symbol | String name) -> bool
-  def self.disarm_all: () -> void
+  # Arms `name`, replacing what it held. `share` is a Fraction or a real
+  # Numeric in 0..1 rounded to millionths; `expires_in` Integer nanoseconds
+  # in 1..LONGEST_EXPERIMENT; a Delay 1..LONGEST_DELAY. Honoured: the core's
+  # arming answer for the name's slot, except that :already_armed needs an
+  # equal (==) `garbled:` substitute too; a differing one replaces it and
+  # answers Replaced holding the experiment. Refused, unchanged: :full
+  # when every slot holds a live experiment. Raises TypeError/RangeError for
+  # malformed arguments or clock readings, and Error when the clock was
+  # replaced READINGS times while arming; nothing is armed when it raises.
+  def self.arm: (Symbol | String name, fault: fault, share: Fraction | Numeric, expires_in: Integer,
+                 ?garbled: untyped) -> (arming | :full)
 
-  # With no name, whether anything at all is armed.
+  # Honoured: Disarmed (what the name held, expired or not), :not_armed.
+  # Takes no reading.
+  def self.disarm: (Symbol | String name) -> disarming
+
+  # Experiments held, expired or not; 0 is unchanged.
+  def self.disarm_all: () -> Integer
+
+  # With no name, whether anything is live now. Retires expired experiments.
   def self.armed?: (?(Symbol | String)?) -> bool
 
-  # The experiments still running, which excludes any that has expired.
+  # The names live now. Retires expired experiments.
   def self.armed: () -> Array[Symbol]
 
-  # Runs the block, or the fault armed under `name` instead. Not the block's
-  # own type: a `:garble` returns the substitute it was armed with, which is
-  # whatever the caller passed as `garbled:`. Makes the real call when the
-  # clock was replaced faster than a reading could be taken.
-  #
-  # Raises `Injected` for a `:raise` fault, which is the point of the gem,
-  # `DeadlineMachines::Error` when a `:delay` spends the ambient budget,
-  # `ArgumentError` for a name it cannot key on or a draw the random gave it,
-  # and `Error` for a clock returning an unusable reading.
+  # Runs the block, or the fault armed under `name`: raises Injected for
+  # :raise, returns the `garbled:` substitute for :garble, waits then runs
+  # the block for a Delay (raising `DeadlineMachines::Error` when that spends
+  # the ambient budget). Raises TypeError/RangeError for a malformed name,
+  # draw or reading.
   def self.run: (Symbol | String name) { () -> untyped } -> untyped
 end

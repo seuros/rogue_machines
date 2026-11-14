@@ -73,27 +73,27 @@ module RogueMachines
       RogueMachines.clock = ParkingClock.new(@entered, @release)
       armer = Thread.new do
         Thread.current[ParkingClock::PARK] = true
-        RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 1)
+        RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: SECOND)
       end
 
       parked
       RogueMachines.clock = DeadlineMachines::TestClock.new
       @release.push(:go)
 
-      # Its reading came from the outgoing clock, so it is re-taken rather
-      # than published: one second means one second of whichever clock the
+      # Its reading came from the outgoing clock, which is no longer the one
+      # installed once the lock is held, so it is re-taken rather than used: one second means one second of whichever clock the
       # experiment ends up measured against.
-      assert_equal :payments, finished(armer)
+      assert_equal :armed, finished(armer)
       assert_equal [:payments], RogueMachines.armed
 
-      RogueMachines.clock.advance(1)
+      advance(SECOND)
 
       assert_empty RogueMachines.armed
     end
 
     def test_a_run_in_flight_across_a_clock_replacement_retires_nothing
       RogueMachines.clock = ParkingClock.new(@entered, @release)
-      RogueMachines.arm(:old, fault: :raise, share: 1.0, expires_in: 60)
+      RogueMachines.arm(:old, fault: :raise, share: 1.0, expires_in: 60 * SECOND)
       runner = Thread.new do
         Thread.current[ParkingClock::PARK] = true
         RogueMachines.run(:old) { :real }
@@ -102,40 +102,30 @@ module RogueMachines
       parked
       RogueMachines.clock = DeadlineMachines::TestClock.new
       RogueMachines.arm(:payments, fault: :garble, garbled: :substitute, share: 1.0,
-                                   expires_in: 300)
+                                   expires_in: 300 * SECOND)
       @release.push(:go)
       finished(runner)
 
-      # The parked reading came from the outgoing clock, and sweeping is
+      # The parked reading came from the outgoing clock, and retiring is
       # destructive, so acting on it would retire what was armed after it.
+      # The clock it read is no longer installed, so it is not acted on.
       assert_equal [:payments], RogueMachines.armed
       assert_equal :substitute, RogueMachines.run(:payments) { :real }
     end
 
-    def test_a_disarm_across_a_clock_replacement_acts_on_the_incoming_clock
-      RogueMachines.clock = ParkingClock.new(@entered, @release)
-      disarmer = Thread.new do
-        Thread.current[ParkingClock::PARK] = true
-        RogueMachines.disarm(:payments)
-      end
+    def test_a_disarm_takes_no_reading
+      RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 60 * SECOND)
+      exploding = Class.new { def now_ns = raise('disarm must not read the clock') }
+      RogueMachines.instance_variable_set(:@clock, exploding.new)
 
-      parked
-      RogueMachines.clock = DeadlineMachines::TestClock.new
-      RogueMachines.arm(:payments, fault: :garble, garbled: :substitute, share: 1.0,
-                                   expires_in: 300)
-      @release.push(:go)
-
-      # Re-taking the reading means it disarms what is actually there rather
-      # than reporting on a clock nobody is using. Two calls racing on one
-      # name is the caller's ambiguity, not this gem's.
-      assert finished(disarmer)
-      assert_empty RogueMachines.armed
-      assert_equal :real, RogueMachines.run(:payments) { :real }
+      assert_kind_of Disarmed, RogueMachines.disarm(:payments)
+    ensure
+      RogueMachines.instance_variable_set(:@clock, nil)
     end
 
     def test_a_query_in_flight_across_a_clock_replacement_keeps_the_substitute
       RogueMachines.clock = ParkingClock.new(@entered, @release)
-      RogueMachines.arm(:old, fault: :raise, share: 1.0, expires_in: 60)
+      RogueMachines.arm(:old, fault: :raise, share: 1.0, expires_in: 60 * SECOND)
       asker = Thread.new do
         Thread.current[ParkingClock::PARK] = true
         RogueMachines.armed
@@ -144,7 +134,7 @@ module RogueMachines
       parked
       RogueMachines.clock = DeadlineMachines::TestClock.new
       RogueMachines.arm(:payments, fault: :garble, garbled: :substitute, share: 1.0,
-                                   expires_in: 300)
+                                   expires_in: 300 * SECOND)
       @release.push(:go)
       finished(asker)
 
@@ -161,20 +151,20 @@ module RogueMachines
       RogueMachines.clock = clock
       armer = Thread.new do
         Thread.current[StallingClock::PARK] = true
-        RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 60)
+        RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 60 * SECOND)
       end
 
       parked
-      clock.reading = 120 * NS_PER_SECOND
+      clock.reading = 120 * SECOND
       @release.push(:go)
 
-      assert_equal :payments, finished(armer)
+      assert_equal :armed, finished(armer)
       assert_empty RogueMachines.armed
     end
 
     def test_a_name_armed_and_disarmed_during_a_call_never_pays_a_missing_payload
       RogueMachines.clock = ParkingClock.new(@entered, @release)
-      RogueMachines.arm(:keeper, fault: :raise, share: 1.0, expires_in: 600)
+      RogueMachines.arm(:keeper, fault: :raise, share: 1.0, expires_in: 600 * SECOND)
       runner = Thread.new do
         Thread.current[ParkingClock::PARK] = true
         RogueMachines.run(:brief) { :real }
@@ -182,7 +172,7 @@ module RogueMachines
 
       parked
       RogueMachines.arm(:brief, fault: :garble, garbled: :substitute, share: 1.0,
-                                expires_in: 60)
+                                expires_in: 60 * SECOND)
       RogueMachines.disarm(:brief)
       @release.push(:go)
 
@@ -198,7 +188,7 @@ module RogueMachines
       # way to change clocks precisely because it cannot be got wrong.
       clock = StallingClock.new(@entered, @release)
       RogueMachines.clock = clock
-      clock.reading = 5 * NS_PER_SECOND
+      clock.reading = 5 * SECOND
       waiter = Thread.new do
         Thread.current[StallingClock::PARK] = true
         RogueMachines.armed
@@ -206,7 +196,7 @@ module RogueMachines
 
       parked
       clock.reading = 0
-      RogueMachines.arm(:fresh, fault: :garble, garbled: :substitute, share: 1.0, expires_in: 1)
+      RogueMachines.arm(:fresh, fault: :garble, garbled: :substitute, share: 1.0, expires_in: SECOND)
       @release.push(:go)
       finished(waiter)
 
@@ -215,7 +205,7 @@ module RogueMachines
 
     def test_a_decision_selecting_an_experiment_newer_than_the_snapshot_still_pays_it
       RogueMachines.clock = ParkingClock.new(@entered, @release)
-      RogueMachines.arm(:keeper, fault: :raise, share: 1.0, expires_in: 600)
+      RogueMachines.arm(:keeper, fault: :raise, share: 1.0, expires_in: 600 * SECOND)
       runner = Thread.new do
         Thread.current[ParkingClock::PARK] = true
         RogueMachines.run(:late) { :real }
@@ -223,7 +213,7 @@ module RogueMachines
 
       parked
       RogueMachines.arm(:late, fault: :garble, garbled: :substitute, share: 1.0,
-                               expires_in: 60)
+                               expires_in: 60 * SECOND)
       @release.push(:go)
 
       # The decision and the payload are two reads. An arm landing between

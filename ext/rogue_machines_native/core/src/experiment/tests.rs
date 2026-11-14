@@ -1,52 +1,62 @@
-use crate::{Experiment, Fault, Fraction, PER_MILLION};
+use core::time::Duration;
 
-fn fraction(millionths: u32) -> Fraction {
-    Fraction::new(millionths).unwrap_or_else(|| unreachable!("{millionths} is a whole at most"))
-}
+use crate::test_support::{at, draw, fraction, raising};
+use crate::{Draw, Fraction, PER_MILLION};
 
 #[test]
-fn a_share_above_the_whole_is_refused() {
+fn a_share_is_at_most_a_whole_and_a_draw_below_one() {
     assert_eq!(Fraction::new(PER_MILLION), Some(Fraction::ALL));
-    assert!(Fraction::new(PER_MILLION + 1).is_none());
+    assert_eq!(Fraction::new(PER_MILLION + 1), None);
+    for (millionths, held) in [
+        (0, true),
+        (PER_MILLION - 1, true),
+        (PER_MILLION, false),
+        (u32::MAX, false),
+    ] {
+        assert_eq!(
+            Draw::new(millionths).map(Draw::millionths),
+            held.then_some(millionths)
+        );
+    }
 }
 
 #[test]
-fn the_extremes_cover_nothing_and_every_draw() {
-    assert!(!Fraction::NONE.covers(0));
-    assert!(!Fraction::NONE.covers(PER_MILLION - 1));
-    assert!(Fraction::ALL.covers(0));
-    assert!(Fraction::ALL.covers(PER_MILLION - 1));
-}
-
-#[test]
-fn a_share_is_half_open_at_its_own_boundary() {
+fn a_share_is_a_half_open_threshold_from_zero() {
     let tenth = fraction(PER_MILLION / 10);
-
-    assert!(tenth.covers(99_999));
-    assert!(!tenth.covers(100_000));
-}
-
-#[test]
-fn a_share_is_a_threshold_from_zero_and_not_an_interval() {
-    let tenth = fraction(PER_MILLION / 10);
-    let rest = fraction(PER_MILLION - PER_MILLION / 10);
-
-    // Both claim a low draw: shares overlap rather than partition, so one
+    // Shares overlap rather than partition: both claim a low draw, so one
     // draw cannot be shared between two experiments.
-    assert!(tenth.covers(0));
-    assert!(rest.covers(0));
+    let rest = fraction(PER_MILLION - PER_MILLION / 10);
+    for (share, millionths, covered) in [
+        (Fraction::NONE, 0, false),
+        (Fraction::NONE, PER_MILLION - 1, false),
+        (Fraction::ALL, 0, true),
+        (Fraction::ALL, PER_MILLION - 1, true),
+        (tenth, 99_999, true),
+        (tenth, 100_000, false),
+        (tenth, 0, true),
+        (rest, 0, true),
+    ] {
+        assert_eq!(
+            share.covers(draw(millionths)),
+            covered,
+            "{share:?} {millionths}"
+        );
+    }
 }
 
 #[test]
-fn a_draw_at_the_whole_is_outside_every_share() {
-    assert!(!Fraction::ALL.covers(PER_MILLION));
-}
-
-#[test]
-fn an_expiry_is_the_first_reading_it_no_longer_runs_at() {
-    let experiment = Experiment::new(Fault::Raise, Fraction::ALL, 100);
-
-    assert!(!experiment.spent(99));
-    assert!(experiment.spent(100));
-    assert!(experiment.spent(101));
+fn an_expiry_is_the_first_instant_it_no_longer_runs_at_and_none_means_never() {
+    for (expires_at, now, spent) in [
+        (at(100), at(99), false),
+        (at(100), at(100), true),
+        (at(100), at(101), true),
+        (Duration::MAX, Duration::new(u64::MAX, 999_999_998), false),
+        (Duration::MAX, Duration::MAX, true),
+    ] {
+        assert_eq!(
+            raising(expires_at).spent(now),
+            spent,
+            "{expires_at:?} at {now:?}"
+        );
+    }
 }

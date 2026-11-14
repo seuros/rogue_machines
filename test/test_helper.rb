@@ -13,6 +13,9 @@ class FixedDraw
 end
 
 module RogueMachines
+  # Integer nanoseconds in a second, for readability in tests only.
+  SECOND = 1_000_000_000
+
   class Test < Minitest::Test
     def setup
       RogueMachines.clock = DeadlineMachines::TestClock.new
@@ -27,6 +30,10 @@ module RogueMachines
 
     def draws(value)
       RogueMachines.random = FixedDraw.new(value)
+    end
+
+    def advance(nanoseconds)
+      RogueMachines.clock.now_ns += nanoseconds
     end
   end
 end

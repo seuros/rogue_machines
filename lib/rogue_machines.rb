@@ -4,293 +4,119 @@ require 'deadline_machines'
 
 require_relative 'rogue_machines/version'
 
-# Rogue, Injection, Error and Injected are defined by the native extension;
-# there is no pure-Ruby implementation to fall back to.
-require 'rogue_machines_native/rogue_machines_native'
-
 # Fault injection: making a dependency fail, stall or lie on purpose.
 #
-# Disarmed is the default. `run` costs one native call that reads one word
-# until something is armed.
+# Two layers. `Rogue` and the Data values below mirror the core one for one:
+# positional, Integer nanoseconds, symbols for unit variants. The module
+# functions (`arm`, `run`, ...) are a process-wide runtime on top of one Rogue
+# that names experiments, owns the clock and the random draw, and performs
+# the fault.
+#
+# Every value validates at construction through the core: TypeError for the
+# wrong type, RangeError for a value the core's constructor rejects.
 module RogueMachines
-  # Attempts at one consistent reading before giving up on a clock that is
-  # being replaced faster than it can be read.
-  READINGS = 100
+  # The core's `Slot`: an index below EXPERIMENTS, picked by the caller.
+  # Not an issued id: any in-range index names a slot.
+  Slot = Data.define(:index) do
+    def initialize(index:)
+      super(index: RogueMachines.__send__(:__slot, index))
+    end
+  end
 
-  @registry = Rogue.new
-  @substitutes = {}.freeze
-  @lock = Mutex.new
-
-  class << self
-    attr_writer :random
-
-    # Monotonic nanoseconds. Delegates to deadline_machines rather than
-    # memoising it, so replacing that gem's clock moves every expiry with it.
-    def clock
-      @clock || DeadlineMachines.clock
+  # The core's `Fraction`: the share of calls a fault reaches, in millionths,
+  # 0..PER_MILLION.
+  Fraction = Data.define(:millionths) do
+    def initialize(millionths:)
+      super(millionths: RogueMachines.__send__(:__fraction, millionths))
     end
 
-    # Installing a clock disarms everything first. Every armed expiry was
-    # computed against the outgoing clock, and an expiry measured against a
-    # clock it did not come from is not an expiry.
-    #
-    # It also starts a generation, so a reading already taken against the
-    # outgoing clock is refused rather than compared against expiries it has
-    # no relation to. `sweep` is destructive, so such a reading would retire
-    # experiments armed after the swap.
-    def clock=(clock)
-      @lock.synchronize do
-        # The native call goes last here, against the rule the other two-store
-        # writes follow, because this order is observable: `reading` is
-        # lock-free, and bumping the generation first would pair an outgoing
-        # reading with the incoming generation, which every consumer accepts.
-        Thread.handle_interrupt(Object => :never) do
-          @substitutes = {}.freeze
-          @clock = clock
-          registry.invalidate
-        end
-      end
+    # The core's `Fraction::covers`: whether `draw` (a Draw) falls in this
+    # share, which is half open at its own boundary.
+    def covers?(draw) = RogueMachines.__send__(:__covers, self, draw)
+  end
+
+  # The core's `Draw`: one call's random draw, in millionths, below
+  # PER_MILLION.
+  Draw = Data.define(:millionths) do
+    def initialize(millionths:)
+      super(millionths: RogueMachines.__send__(:__draw, millionths))
+    end
+  end
+
+  # The core's `Fault::Delay`: wait `duration` Integer nanoseconds, then make
+  # the real call. The other faults are the symbols :raise and :garble.
+  Delay = Data.define(:duration) do
+    def initialize(duration:)
+      super(duration: RogueMachines.__send__(:__delay, duration))
+    end
+  end
+
+  # The core's `Experiment`: a fault (:raise, :garble or a Delay), the
+  # Fraction of calls it reaches, and the Integer nanosecond instant it
+  # expires at.
+  Experiment = Data.define(:fault, :fraction, :expires_at) do
+    def initialize(fault:, fraction:, expires_at:)
+      fault, fraction, expires_at = RogueMachines.__send__(:__experiment, fault, fraction, expires_at)
+      super
     end
 
-    def random
-      @random ||= Random.new
+    # The core's `Experiment::spent`: whether this has expired by `now`
+    # Integer nanoseconds, `now >= expires_at`.
+    def spent?(now) = RogueMachines.__send__(:__spent, self, now)
+  end
+
+  # The core's `Decision::Inject`: do `fault` instead of the real call.
+  Inject = Data.define(:fault) do
+    def initialize(fault:)
+      super(fault: RogueMachines.__send__(:__fault, fault))
     end
+  end
 
-    def registry
-      @registry
+  # The core's `Arming::Replaced`: the experiment the slot held before.
+  Replaced = Data.define(:experiment) do
+    def initialize(experiment:)
+      super(experiment: RogueMachines.__send__(:__held, experiment))
     end
+  end
 
-    # Arms an experiment under `name`, replacing any already there.
-    #
-    #   RogueMachines.arm(:payments, fault: :raise, share: 0.01, expires_in: 300)
-    #   RogueMachines.arm(:slow, fault: :delay, delay: 2, share: 1.0, expires_in: 60)
-    #   RogueMachines.arm(:lies, fault: :garble, garbled: [], share: 0.5, expires_in: 60)
-    #
-    # `expires_in` is required and counts from now, so no experiment outlives
-    # the person who armed it.
-    def arm(name, fault:, share:, expires_in:, delay: nil, garbled: nil)
-      key = named(name)
-
-      # The reading is taken before the lock so that a caller's clock never
-      # runs inside it, which means the expiry is measured from slightly
-      # before the arming. See "The clock is deadline_machines'" in the README.
-      pair = reading
-      unless pair
-        raise Error, "the clock was replaced #{READINGS} times while taking one reading; " \
-                     'nothing is armed'
-      end
-
-      now, age = pair
-      options = { fault: fault.to_s, share: Float(share), expires_in: Float(expires_in),
-                  now_ns: now, generation: age }
-      options[:delay] = Float(delay) if delay
-
-      @lock.synchronize do
-        # Two stores. An interrupt landing between them would leave an armed
-        # garble with nothing to return for the rest of its life, and nothing
-        # repairs that, because publishing only ever removes keys.
-        Thread.handle_interrupt(Object => :never) do
-          registry.arm(key, **options)
-          payload = options[:fault] == 'garble' ? garbled : nil
-          publish(substitutes.merge(key => payload), registry.armed(now, age))
-        end
-      end
-      name
-    end
-
-    # Reports whether `name` was still running, which an experiment that
-    # expired on its own is not.
-    #
-    # The substitute goes first: a call landing between the two sees a garble
-    # with nothing to return rather than the real value it was armed against.
-    def disarm(name)
-      key = named(name)
-      pair = reading
-      return false unless pair
-
-      now, age = pair
-      @lock.synchronize do
-        # A reading from a replaced clock must not drop a substitute belonging
-        # to the generation that replaced it.
-        break false unless registry.generation == age
-
-        # The native call validates its reading and can raise, so it goes
-        # first: nothing is mutated unless it succeeds. Ordering no longer
-        # matters to a reader, since a decision and its payload are read
-        # under this same lock.
-        Thread.handle_interrupt(Object => :never) do
-          was_running = registry.disarm(key, now, age)
-          @substitutes = substitutes.except(key).freeze
-          was_running
-        end
-      end
-    end
-
-    def disarm_all
-      @lock.synchronize do
-        Thread.handle_interrupt(Object => :never) do
-          registry.disarm_all
-          @substitutes = {}.freeze
-        end
-      end
-    end
-
-    # With no name, whether anything at all is armed. Asked through the name
-    # list rather than the gate `run` reads, because the gate only drops an
-    # expired experiment when something next decides.
-    def armed?(name = nil)
-      names = running
-      return names.any? if name.nil?
-
-      names.include?(named(name))
-    end
-
-    # The experiments still running, which excludes any that has expired.
-    def armed
-      running.map(&:to_sym)
-    end
-
-    # Runs the block, or the fault armed under `name` instead.
-    def run(name)
-      check(name)
-      unless registry.any_armed?
-        release unless substitutes.empty?
-        return yield
-      end
-
-      key = named(name)
-      pair = reading
-      return yield unless pair
-
-      now, age = pair
-      drawn = random.rand(PER_MILLION)
-
-      # The decision and the payload live in different stores, so reading them
-      # one after the other is wrong in both orders: a name published between
-      # the two is in the decision and not the table, and one retired between
-      # them is in the table and not the decision. They are read together.
-      # Nothing caller-supplied runs inside the lock, since the clock and the
-      # draw are already taken.
-      injection, payload = @lock.synchronize do
-        found = registry.decide(key, now, drawn, age)
-        [found, found && substitutes[key]]
-      end
-      reconcile(now, age)
-      return yield unless injection
-
-      case injection.fault
-      when :raise then raise Injected, "#{name} is armed to raise"
-      when :garble then payload
-      when :delay
-        stall(injection.delay_ns)
-        yield
-      end
-    end
-
-    private
-
-    def substitutes
-      @substitutes
-    end
-
-    # A reading and the generation it belongs to.
-    #
-    # The generation is read on both sides of the reading. Reading it only
-    # afterwards would adopt the new one and hand a stale reading to a
-    # destructive sweep; reading it only before would pair an outgoing
-    # reading with the incoming generation, which every consumer accepts. The
-    # pair cannot be sampled in one step, so a change means retry.
-    def reading
-      READINGS.times do
-        age = registry.generation
-        now = clock.now_ns
-        unless now.is_a?(Integer) && !now.negative?
-          raise Error, "#{clock.class} returned #{now.inspect}; a reading must be a " \
-                       'non-negative Integer of nanoseconds'
-        end
-        return [now, age] if registry.generation == age
-      end
-      nil
-    end
-
-    # Rejects a name the native table could not key on, without converting it,
-    # so a call site answers the same way whether or not anything is armed.
-    def check(name)
-      case name
-      when Symbol then legible(name.name)
-      when String then legible(name)
-      else raise ArgumentError, "an experiment name must be a Symbol or a String, got #{name.class}"
-      end
-    end
-
-    def legible(name)
-      raise ArgumentError, 'an experiment needs a name' if name.empty?
-      return if name.ascii_only?
-      return if name.encoding == Encoding::UTF_8 && name.valid_encoding?
-      raise ArgumentError, "an experiment name must be valid UTF-8, got #{name.encoding}" \
-        unless name.encoding == Encoding::UTF_8
-
-      raise ArgumentError, 'an experiment name holds bytes that are not valid UTF-8'
-    end
-
-    # The checked name, as something the native table can key on. Not `to_s`:
-    # a String subclass can override it, which armed one name and reported
-    # another.
-    def named(name)
-      check(name)
-      name.is_a?(Symbol) ? name.name : name
-    end
-
-    # The names still running, releasing the substitutes of everything that is
-    # not.
-    def running
-      pair = reading
-      return [] unless pair
-
-      now, age = pair
-      @lock.synchronize do
-        # A reading from a replaced clock lists nothing, and must not be used
-        # to prune: publishing against an empty list would wipe the table.
-        break [] unless registry.generation == age
-
-        names = registry.armed(now, age)
-        publish(substitutes, names)
-        names
-      end
-    end
-
-    # Releases the substitutes of anything no longer running, so one armed
-    # experiment holding the gate open cannot keep another's substitute, and
-    # the caller's object, alive until the next `arm`.
-    def reconcile(now_ns, age)
-      return if substitutes.size <= registry.armed_count(now_ns, age)
-
-      @lock.synchronize do
-        publish(substitutes, registry.armed(now_ns, age)) if registry.generation == age
-      end
-    end
-
-    # Only if nothing is armed once the lock is held. The gate `run` reads is
-    # sampled before it, so an `arm` landing in between would otherwise have
-    # its just-published substitute discarded, leaving an armed garble with
-    # nothing to return for the rest of its life.
-    def release
-      @lock.synchronize { @substitutes = {}.freeze unless registry.any_armed? }
-    end
-
-    # Replaces the table with the entries `names` still covers, in one
-    # assignment.
-    def publish(table, names)
-      @substitutes = table.slice(*names).freeze
-    end
-
-    # Spends the delay against the caller's deadline rather than past it, so a
-    # slow dependency trips the timeout that was already there.
-    def stall(delay_ns)
-      DeadlineMachines.check!
-      seconds = DeadlineMachines.clamp_sleep(delay_ns.fdiv(NS_PER_SECOND))
-      sleep(seconds) if seconds.positive?
-      DeadlineMachines.check!
+  # The core's `Disarming::Disarmed`: the experiment the slot held.
+  Disarmed = Data.define(:experiment) do
+    def initialize(experiment:)
+      super(experiment: RogueMachines.__send__(:__held, experiment))
     end
   end
 end
+
+# Native is required: there is no pure-Ruby fallback. It validates and builds
+# the Data values above, so they must exist first.
+require 'rogue_machines_native/rogue_machines_native'
+
+module RogueMachines
+  private_class_method :__slot, :__fraction, :__draw, :__delay, :__experiment, :__fault, :__held,
+                       :__spent, :__covers
+
+  # The core's `Fraction::NONE` and `Fraction::ALL`.
+  Fraction::NONE = Fraction.new(0)
+  Fraction::ALL = Fraction.new(PER_MILLION)
+
+  # The values are final. `initialize` is where each validates, and a subclass
+  # could override it, or `allocate` build an instance that never ran it:
+  # subclassing raises TypeError (as subclassing Class does) and `allocate`
+  # is gone. `new`, keywords, `with` and `dup` all still run the check.
+  [Slot, Fraction, Draw, Delay, Experiment, Inject, Replaced, Disarmed].each do |value|
+    value.singleton_class.undef_method(:allocate)
+    value.define_singleton_method(:inherited) { |_| raise TypeError, "#{value} cannot be subclassed" }
+  end
+  # The native Rogue has no allocator; it is final too.
+  Rogue.define_singleton_method(:inherited) { |_| raise TypeError, "#{Rogue} cannot be subclassed" }
+
+  class Rogue
+    # A copy, frozen when this is unless `freeze:` says otherwise.
+    def clone(freeze: nil)
+      copy = dup
+      (freeze.nil? ? frozen? : freeze) ? copy.freeze : copy
+    end
+  end
+end
+
+require_relative 'rogue_machines/runtime'

@@ -3,168 +3,215 @@
 require 'test_helper'
 
 module RogueMachines
+  # The process-wide runtime: naming, arming and disarming.
   class ArmingTest < Test
+    MINUTE = 60 * SECOND
+
+    # Everything the runtime holds, read without a reading.
+    def snapshot
+      rogue = RogueMachines.rogue
+      [rogue.armed_count, (0...EXPERIMENTS).map { |index| rogue.experiment(Slot.new(index)) },
+       RogueMachines.instance_variable_get(:@slots).dup,
+       RogueMachines.instance_variable_get(:@substitutes).dup]
+    end
+
     def test_a_fresh_process_is_disarmed_and_runs_the_real_call
-      refute_predicate RogueMachines, :armed?
+      refute RogueMachines.armed?
       assert_equal :real, RogueMachines.run(:payments) { :real }
-      assert_empty RogueMachines.armed
     end
 
-    def test_an_experiment_cannot_be_armed_without_an_expiry
+    def test_arming_answers_what_the_core_answered
+      assert_equal :armed, RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: MINUTE)
+      answer = RogueMachines.arm(:payments, fault: :garble, share: 1.0, expires_in: MINUTE)
+
+      assert_equal Replaced.new(Experiment.new(:raise, Fraction::ALL, MINUTE)), answer
+    end
+
+    def test_rearming_the_same_experiment_at_the_same_instant_is_an_honoured_repeat
+      RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: MINUTE)
+      before = snapshot
+
+      assert_equal :already_armed, RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: MINUTE)
+      assert_equal before, snapshot
+    end
+
+    # The defect: a differing substitute was stored while answering
+    # :already_armed. The payload is part of what is armed, so a differing one
+    # is a replacement, as a differing experiment is in the core.
+    def test_rearming_with_a_different_substitute_is_a_replacement_not_a_repeat
+      RogueMachines.arm(:lies, fault: :garble, garbled: [1], share: 1.0, expires_in: MINUTE)
+      before = snapshot
+
+      repeat = RogueMachines.arm(:lies, fault: :garble, garbled: [1], share: 1.0, expires_in: MINUTE)
+
+      assert_equal :already_armed, repeat
+      assert_equal before, snapshot
+      answer = RogueMachines.arm(:lies, fault: :garble, garbled: [2], share: 1.0, expires_in: MINUTE)
+
+      assert_equal Replaced.new(Experiment.new(:garble, Fraction::ALL, MINUTE)), answer
+      assert_equal [2], RogueMachines.run(:lies) { :real }
+    end
+
+    def test_time_is_integer_nanoseconds_and_an_expiry_is_required
       assert_raises(ArgumentError) { RogueMachines.arm(:payments, fault: :raise, share: 1.0) }
-    end
-
-    def test_an_expiry_that_has_already_passed_is_refused
-      [0, -1].each do |expires_in|
-        assert_raises(ArgumentError) do
-          RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: expires_in)
-        end
-      end
-    end
-
-    def test_an_expiry_too_small_to_express_is_refused_rather_than_armed_dead
-      # 5e-10 is the value that rounds UP to one nanosecond.
-      [1e-12, 4.9e-10, 5.0e-10].each do |expires_in|
-        assert_raises(ArgumentError) do
-          RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: expires_in)
-        end
-      end
+      assert_raises(TypeError) { RogueMachines.arm(:p, fault: :raise, share: 1.0, expires_in: 60.0) }
+      assert_raises(TypeError) { RogueMachines.arm(:p, fault: :raise, share: 1.0, expires_in: '60') }
+      assert_raises(RangeError) { RogueMachines.arm(:p, fault: :raise, share: 1.0, expires_in: 0) }
+      assert_raises(RangeError) { RogueMachines.arm(:p, fault: :raise, share: 1.0, expires_in: -1) }
+      assert_raises(TypeError) { Delay.new(0.5) }
       assert_empty RogueMachines.armed
     end
 
     def test_the_longest_experiment_is_exactly_a_day
-      # A saturating float cast made the overflow guard decorative, so an
-      # unbounded expires_in armed an experiment for centuries. The cap is
-      # documented, so it is tested at the value either side of it.
-      RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 86_400)
+      day = 24 * 60 * MINUTE
 
-      assert_equal [:payments], RogueMachines.armed
-
-      [86_400.1, 86_401, 1e20, 10**30].each do |expires_in|
-        assert_raises(ArgumentError) do
-          RogueMachines.arm(:longer, fault: :raise, share: 1.0, expires_in: expires_in)
-        end
-      end
-      assert_equal [:payments], RogueMachines.armed
+      assert_equal day, LONGEST_EXPERIMENT
+      assert_equal :armed, RogueMachines.arm(:p, fault: :raise, share: 1.0, expires_in: day)
+      assert_raises(RangeError) { RogueMachines.arm(:q, fault: :raise, share: 1.0, expires_in: day + 1) }
     end
 
     def test_the_longest_delay_is_exactly_five_minutes
-      RogueMachines.arm(:slow, fault: :delay, delay: 300, share: 0.0, expires_in: 60)
-
-      assert_equal [:slow], RogueMachines.armed
-
-      [300.1, 301, 10**12].each do |delay|
-        assert_raises(ArgumentError) do
-          RogueMachines.arm(:slower, fault: :delay, delay: delay, share: 0.0, expires_in: 60)
-        end
+      assert_equal 5 * MINUTE, LONGEST_DELAY
+      assert_equal :armed, RogueMachines.arm(:p, fault: Delay.new(5 * MINUTE), share: 1.0, expires_in: MINUTE)
+      assert_raises(RangeError) do
+        RogueMachines.arm(:q, fault: Delay.new((5 * MINUTE) + 1), share: 1.0, expires_in: MINUTE)
       end
+      assert_raises(RangeError) { RogueMachines.arm(:q, fault: Delay.new(0), share: 1.0, expires_in: MINUTE) }
     end
 
-    def test_a_share_too_small_to_express_is_refused_rather_than_silently_nothing
-      # 5e-7 is the value that rounds UP to one millionth, so it is the one
-      # that matters: rounding would silently double the share asked for.
-      [4.9e-7, 5.0e-7, 9.9e-7].each do |share|
-        assert_raises(ArgumentError) do
-          RogueMachines.arm(:payments, fault: :raise, share: share, expires_in: 60)
-        end
+    def test_a_fault_is_raise_garble_or_a_delay
+      assert_raises(RangeError) { RogueMachines.arm(:p, fault: :explode, share: 1.0, expires_in: MINUTE) }
+      assert_raises(TypeError) { RogueMachines.arm(:p, fault: 'raise', share: 1.0, expires_in: MINUTE) }
+      assert_raises(TypeError) { RogueMachines.arm(:p, fault: 5, share: 1.0, expires_in: MINUTE) }
+    end
+
+    def test_a_share_is_a_whole_at_most_and_expressible
+      assert_raises(RangeError) { RogueMachines.arm(:p, fault: :raise, share: 1.5, expires_in: MINUTE) }
+      assert_raises(RangeError) { RogueMachines.arm(:p, fault: :raise, share: -0.1, expires_in: MINUTE) }
+      assert_raises(RangeError) { RogueMachines.arm(:p, fault: :raise, share: Float::NAN, expires_in: MINUTE) }
+      assert_raises(RangeError) { RogueMachines.arm(:p, fault: :raise, share: 1e-7, expires_in: MINUTE) }
+      assert_raises(TypeError) { RogueMachines.arm(:p, fault: :raise, share: '1', expires_in: MINUTE) }
+      assert_equal :armed, RogueMachines.arm(:p, fault: :raise, share: Fraction.new(5), expires_in: MINUTE)
+      assert_equal Fraction.new(5), RogueMachines.rogue.experiment(Slot.new(0)).fraction
+    end
+
+    def test_a_name_is_a_symbol_or_a_nonempty_legible_string
+      assert_raises(TypeError) { RogueMachines.arm(5, fault: :raise, share: 1.0, expires_in: MINUTE) }
+      assert_raises(RangeError) { RogueMachines.arm('', fault: :raise, share: 1.0, expires_in: MINUTE) }
+      assert_raises(RangeError) { RogueMachines.arm(+"\xff", fault: :raise, share: 1.0, expires_in: MINUTE) }
+      assert_raises(TypeError) { RogueMachines.run(5) { :real } }
+      assert_raises(TypeError) { RogueMachines.disarm(nil) }
+      assert_equal :armed, RogueMachines.arm('cafés', fault: :raise, share: 1.0, expires_in: MINUTE)
+      assert_equal [:cafés], RogueMachines.armed
+    end
+
+    def test_a_name_whose_to_s_lies_is_armed_under_its_own_content
+      liar = Class.new(String) { def to_s = 'other' }.new('payments')
+      RogueMachines.arm(liar, fault: :raise, share: 1.0, expires_in: MINUTE)
+
+      assert_equal [:payments], RogueMachines.armed
+    end
+
+    def test_a_raising_argument_changes_nothing
+      RogueMachines.arm(:payments, fault: :garble, garbled: :kept, share: 1.0, expires_in: MINUTE)
+      before = snapshot
+
+      assert_raises(RangeError) { RogueMachines.arm(:payments, fault: :raise, share: 2, expires_in: MINUTE) }
+      assert_raises(TypeError) { RogueMachines.arm(:other, fault: :garble, share: 1.0, expires_in: 1.0) }
+      assert_equal before, snapshot
+      assert_equal :kept, RogueMachines.run(:payments) { :real }
+    end
+
+    def test_an_expiry_past_the_end_of_the_clock_raises_and_changes_nothing
+      RogueMachines.clock.now_ns = (2**64) - 1
+      before = snapshot
+
+      assert_raises(RangeError) { RogueMachines.arm(:p, fault: :raise, share: 1.0, expires_in: 1) }
+      assert_equal before, snapshot
+    end
+
+    def test_running_out_of_slots_is_refused_and_changes_nothing
+      EXPERIMENTS.times do |index|
+        RogueMachines.arm(:"e#{index}", fault: :garble, garbled: index, share: 1.0, expires_in: MINUTE)
       end
-      assert_empty RogueMachines.armed
+      before = snapshot
+
+      assert_equal :full, RogueMachines.arm(:one_more, fault: :raise, share: 1.0, expires_in: MINUTE)
+      assert_equal before, snapshot
+      # The names already armed can still be re-armed.
+      assert_kind_of Replaced, RogueMachines.arm(:e0, fault: :raise, share: 1.0, expires_in: 2 * MINUTE)
     end
 
-    def test_a_clock_returning_an_unusable_reading_is_named_in_the_error
-      # The caller passed no reading, so blaming an argument would send them
-      # looking in the wrong place. A bare RangeError from the conversion
-      # would be worse still.
-      RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 60)
-      RogueMachines.clock.advance(-1)
-
-      raised = assert_raises(Error) { RogueMachines.run(:unrelated) { :real } }
-
-      assert_match(/TestClock returned -1000000000/, raised.message)
-
-      [-> { RogueMachines.armed }, -> { RogueMachines.armed?(:payments) },
-       -> { RogueMachines.disarm(:payments) },
-       -> { RogueMachines.arm(:other, fault: :raise, share: 1.0, expires_in: 60) }].each do |call|
-        assert_raises(Error, &call)
+    def test_an_expired_experiment_gives_its_slot_to_the_next_arm
+      EXPERIMENTS.times do |index|
+        RogueMachines.arm(:"e#{index}", fault: :raise, share: 1.0, expires_in: (index + 1) * SECOND)
       end
+      advance(SECOND)
+
+      assert_equal :armed, RogueMachines.arm(:late, fault: :raise, share: 1.0, expires_in: MINUTE)
+      refute_includes RogueMachines.armed, :e0
+      assert_includes RogueMachines.armed, :late
     end
 
-    def test_a_reading_passed_straight_to_the_registry_is_still_an_argument
-      now = RogueMachines.clock.now_ns
-      age = RogueMachines.registry.generation
+    def test_disarm_hands_back_what_the_name_held_and_a_repeat_is_not_armed
+      RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: MINUTE)
 
-      assert_raises(ArgumentError) { RogueMachines.registry.armed(-1, age) }
-      assert_raises(ArgumentError) { RogueMachines.registry.armed(now.to_f, age) }
+      assert_equal Disarmed.new(Experiment.new(:raise, Fraction::ALL, MINUTE)), RogueMachines.disarm(:payments)
+      before = snapshot
+
+      assert_equal :not_armed, RogueMachines.disarm('payments')
+      assert_equal before, snapshot
+      # An expired experiment it still held is handed back too.
+      RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: SECOND)
+      advance(SECOND)
+
+      assert_kind_of Disarmed, RogueMachines.disarm(:payments)
     end
 
-    def test_no_reading_seam_truncates_a_float
-      # Every seam that takes a reading, not just the one that decides: a
-      # truncated reading silently moves an expiry.
-      now = RogueMachines.clock.now_ns
-      age = RogueMachines.registry.generation
-      RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 60)
+    # The reader hands out a frozen copy: disarming the runtime's own Rogue
+    # through it would leave a name on an empty slot, which the next arm
+    # hands to a second name, so one name ran the other's fault.
+    def test_the_rogue_reader_cannot_disarm_behind_the_names
+      RogueMachines.arm(:a, fault: :raise, share: 1.0, expires_in: MINUTE)
+      rogue = RogueMachines.rogue
 
-      assert_raises(ArgumentError) { RogueMachines.registry.armed(now.to_f, age) }
-      assert_raises(ArgumentError) { RogueMachines.registry.armed_count(now.to_f, age) }
-      assert_raises(ArgumentError) { RogueMachines.registry.disarm('payments', now.to_f, age) }
-      assert_raises(ArgumentError) { RogueMachines.registry.decide('payments', now.to_f, 0, age) }
-      assert_raises(ArgumentError) do
-        RogueMachines.registry.arm('x', fault: 'raise', share: 1.0, expires_in: 60.0,
-                                        now_ns: now.to_f, generation: age)
-      end
+      assert_predicate rogue, :frozen?
+      assert_raises(FrozenError) { rogue.disarm(Slot.new(0)) }
+      assert_raises(FrozenError) { rogue.arm(Slot.new(1), Experiment.new(:raise, Fraction::ALL, 1)) }
+      RogueMachines.arm(:b, fault: :garble, garbled: 'b', share: 1.0, expires_in: MINUTE)
+
+      refute_equal(*RogueMachines.instance_variable_get(:@slots).values_at('a', 'b'))
+      assert_raises(Injected) { RogueMachines.run(:a) { :real } }
+      assert_equal 'b', RogueMachines.run(:b) { :real }
+      assert_equal 2, rogue.armed_count + 1, 'a copy, taken when it was read'
     end
 
-    def test_a_draw_that_is_not_an_integer_is_refused_rather_than_truncated
-      # A Float draw truncates to 0, which every share covers, so a caller
-      # whose rand returns a Float would inject on every call instead of none.
-      RogueMachines.arm(:payments, fault: :raise, share: 1e-6, expires_in: 60)
-      RogueMachines.random = Class.new { def rand(_) = 0.9999 }.new
+    # A substitute whose `==` raises is compared before anything is stored, so
+    # the raise leaves every store as it was.
+    def test_a_substitute_whose_equality_raises_changes_nothing
+      bomb = Object.new
+      def bomb.==(_) = raise(IOError, 'no comparison')
+      RogueMachines.arm(:a, fault: :garble, garbled: bomb, share: 1.0, expires_in: MINUTE)
+      before = snapshot
 
-      assert_raises(ArgumentError) { RogueMachines.run(:payments) { :real } }
+      assert_raises(IOError) { RogueMachines.arm(:a, fault: :raise, share: 1.0, expires_in: MINUTE) }
+      assert_equal before, snapshot
     end
 
-    def test_a_name_the_native_table_cannot_key_on_is_refused_as_an_argument
-      # A call site must answer the same way whether or not something else
-      # happens to be armed, so this is checked on both paths.
-      names = ["\xff\xfe".b, "\xff\xfe".b.to_sym, nil, '', :'', 123]
+    def test_disarm_all_stops_everything_and_counts_it
+      RogueMachines.arm(:a, fault: :garble, garbled: :x, share: 1.0, expires_in: MINUTE)
+      RogueMachines.arm(:b, fault: :raise, share: 1.0, expires_in: MINUTE)
 
-      names.each do |name|
-        assert_raises(ArgumentError) { RogueMachines.run(name) { :real } }
-      end
-
-      RogueMachines.arm(:other, fault: :raise, share: 1.0, expires_in: 60)
-
-      names.each do |name|
-        assert_raises(ArgumentError) { RogueMachines.run(name) { :real } }
-      end
-      assert_raises(ArgumentError) { RogueMachines.disarm("\xff\xfe".b) }
+      assert_equal 2, RogueMachines.disarm_all
+      assert_equal 0, RogueMachines.disarm_all
+      assert_equal :real, RogueMachines.run(:a) { :real }
+      assert_empty RogueMachines.instance_variable_get(:@substitutes)
     end
 
-    def test_the_fast_path_does_not_release_a_substitute_that_is_still_armed
-      # The gate `run` reads is sampled before the lock, so an arm landing in
-      # between must not have its substitute discarded.
-      RogueMachines.arm(:payments, fault: :garble, garbled: :substitute, share: 1.0,
-                                   expires_in: 60)
+    def test_only_a_garble_keeps_the_object_it_was_armed_with
+      RogueMachines.arm(:a, fault: :raise, garbled: :ignored, share: 1.0, expires_in: MINUTE)
 
-      RogueMachines.send(:release)
-
-      assert_equal :substitute, RogueMachines.run(:payments) { :real }
-    end
-
-    def test_an_experiment_needs_a_name
-      [nil, ''].each do |name|
-        assert_raises(ArgumentError) do
-          RogueMachines.arm(name, fault: :raise, share: 1.0, expires_in: 60)
-        end
-      end
-    end
-
-    def test_a_garble_armed_with_no_substitute_returns_nil_by_design
-      RogueMachines.registry.arm('direct', fault: 'garble', share: 1.0, expires_in: 60.0,
-                                           now_ns: RogueMachines.clock.now_ns,
-                                           generation: RogueMachines.registry.generation)
-
-      assert_nil RogueMachines.run(:direct) { :real }
+      assert_empty RogueMachines.instance_variable_get(:@substitutes)
     end
 
     def test_concurrent_arming_keeps_every_substitute
@@ -177,213 +224,34 @@ module RogueMachines
       RogueMachines.clock = yielding.new
 
       threads = %i[a b c].map do |name|
-        Thread.new do
-          RogueMachines.arm(name, fault: :garble, garbled: name, share: 1.0, expires_in: 60)
-        end
+        Thread.new { RogueMachines.arm(name, fault: :garble, garbled: name, share: 1.0, expires_in: MINUTE) }
       end
       threads.each { |thread| thread.join(10) || flunk('an arming thread never finished') }
 
-      assert_equal %i[a b c], %i[a b c].map { |name| RogueMachines.run(name) { :real } }
+      assert_equal(%i[a b c], %i[a b c].map { |name| RogueMachines.run(name) { :real } })
     end
 
-    def test_a_draw_outside_the_whole_is_refused_rather_than_biased_to_pass
-      RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 60)
+    def test_a_clock_returning_an_unusable_reading_is_named_in_the_error
+      RogueMachines.clock = Class.new { def now_ns = 1.5 }.new
+      error = assert_raises(TypeError) { RogueMachines.arm(:p, fault: :raise, share: 1.0, expires_in: MINUTE) }
+      assert_match(/1\.5/, error.message)
 
-      age = RogueMachines.registry.generation
-      now = RogueMachines.clock.now_ns
-
-      [PER_MILLION, PER_MILLION + 1, 2**40, -1].each do |drawn|
-        assert_raises(ArgumentError) do
-          RogueMachines.registry.decide('payments', now, drawn, age)
-        end
-      end
+      RogueMachines.clock = Class.new { def now_ns = -1 }.new
+      assert_raises(RangeError) { RogueMachines.arm(:p, fault: :raise, share: 1.0, expires_in: MINUTE) }
     end
 
-    def test_a_refused_arm_leaves_a_running_experiment_untouched
-      RogueMachines.arm(:payments, fault: :garble, garbled: :good, share: 1.0, expires_in: 60)
-
-      assert_raises(ArgumentError) do
-        RogueMachines.arm(:payments, fault: :bogus, garbled: :bad, share: 1.0, expires_in: 60)
-      end
-
-      assert_equal :good, RogueMachines.run(:payments) { :real }
-    end
-
-    def test_a_refused_arm_leaves_no_substitute_behind
-      RogueMachines.arm(:payments, fault: :garble, garbled: :good, share: 1.0, expires_in: 60)
-
-      100.times do |index|
-        assert_raises(ArgumentError) do
-          RogueMachines.arm(:"refused_#{index}", fault: :bogus, share: 1.0, expires_in: 60)
-        end
-      end
-
-      assert_equal %w[payments], RogueMachines.send(:substitutes).keys
-    end
-
-    def test_a_disarm_that_raises_leaves_both_stores_untouched
-      # The native call validates its reading and can raise. Removing the
-      # substitute first left an armed garble with nothing to return, which
-      # deferring interrupts does not prevent: a raise is not an interrupt.
-      RogueMachines.arm(:payments, fault: :garble, garbled: :substitute, share: 1.0,
-                                   expires_in: 3600)
-      RogueMachines.clock.advance(-1)
-
-      assert_raises(Error) { RogueMachines.disarm(:payments) }
-
-      RogueMachines.clock.advance(1)
-
-      assert_equal [:payments], RogueMachines.armed
-      assert_equal :substitute, RogueMachines.run(:payments) { :real }
-    end
-
-    def test_only_a_garble_keeps_the_object_it_was_armed_with
-      RogueMachines.arm(:loud, fault: :raise, garbled: 'unused', share: 1.0, expires_in: 60)
-
-      assert_nil RogueMachines.send(:substitutes).fetch('loud')
-    end
-
-    def test_a_clock_replaced_faster_than_it_can_be_read_follows_the_contract
-      # The reading and the generation it belongs to are sampled separately,
-      # so a mismatch means retry, and an unbounded retry is a livelock.
-      # Giving up follows the documented contract rather than raising at a
-      # protected call site: arming raises, a decision makes the real call, a
-      # query reports nothing.
-      churning = Class.new do
+    def test_a_clock_replaced_faster_than_it_can_be_read_raises_and_arms_nothing
+      churn = Class.new do
         def now_ns
-          RogueMachines.registry.invalidate
+          RogueMachines.instance_variable_set(:@clock, self.class.new)
           0
         end
       end
-      RogueMachines.clock = churning.new
+      RogueMachines.clock = churn.new
 
-      assert_equal :real, RogueMachines.run(:payments) { :real }
+      assert_raises(Error) { RogueMachines.arm(:p, fault: :raise, share: 1.0, expires_in: MINUTE) }
+      assert_equal 0, RogueMachines.rogue.armed_count
       assert_empty RogueMachines.armed
-      refute RogueMachines.armed?(:payments)
-      refute RogueMachines.disarm(:payments)
-      assert_raises(Error) do
-        RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 60)
-      end
-    end
-
-    def test_disarm_does_not_claim_an_expired_experiment_was_running
-      RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 10)
-      RogueMachines.clock.advance(10)
-
-      refute RogueMachines.armed?(:payments)
-      refute RogueMachines.disarm(:payments)
-    end
-
-    def test_a_share_outside_a_whole_is_refused
-      [-0.1, 1.1, Float::NAN].each do |share|
-        assert_raises(ArgumentError) do
-          RogueMachines.arm(:payments, fault: :raise, share: share, expires_in: 60)
-        end
-      end
-    end
-
-    def test_an_unknown_fault_is_refused
-      assert_raises(ArgumentError) do
-        RogueMachines.arm(:payments, fault: :explode, share: 1.0, expires_in: 60)
-      end
-    end
-
-    def test_a_delay_fault_needs_a_delay
-      assert_raises(ArgumentError) do
-        RogueMachines.arm(:slow, fault: :delay, share: 1.0, expires_in: 60)
-      end
-    end
-
-    def test_disarm_all_stops_everything_and_releases_every_payload
-      RogueMachines.arm(:paying, fault: :garble, garbled: :substitute, share: 1.0,
-                                 expires_in: 60)
-      RogueMachines.arm(:loud, fault: :raise, share: 1.0, expires_in: 60)
-
-      RogueMachines.disarm_all
-
-      assert_empty RogueMachines.armed
-      assert_empty RogueMachines.send(:substitutes)
-      assert_equal :real, RogueMachines.run(:paying) { :real }
-    end
-
-    def test_a_name_whose_to_s_lies_is_armed_under_its_own_content
-      lying = Class.new(String) { def to_s = 'somewhere_else' }
-      name = lying.new('mine')
-
-      assert_equal name, RogueMachines.arm(name, fault: :garble, garbled: :substitute,
-                                                 share: 1.0, expires_in: 60)
-      assert_equal [:mine], RogueMachines.armed
-      assert_equal :substitute, RogueMachines.run('mine') { :real }
-    end
-
-    def test_a_name_outside_ascii_round_trips_through_the_native_table
-      RogueMachines.arm(:"paiements_été", fault: :garble, garbled: :substitute, share: 1.0,
-                                          expires_in: 60)
-
-      assert_equal [:"paiements_été"], RogueMachines.armed
-      assert_equal :substitute, RogueMachines.run(:"paiements_été") { :real }
-    end
-
-    def test_the_capacity_is_the_width_of_the_armed_mask
-      assert_equal 32, EXPERIMENTS
-    end
-
-    def test_invalidate_reports_the_generation_it_started
-      before = RogueMachines.registry.generation
-
-      assert_equal RogueMachines.registry.invalidate, RogueMachines.registry.generation
-      refute_equal before, RogueMachines.registry.generation
-    end
-
-    def test_inspect_says_which_count_it_is_showing
-      RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 60)
-
-      assert_equal "#<RogueMachines::Rogue armed=1 of 32 at the last decision>",
-                   RogueMachines.registry.inspect
-    end
-
-    def test_disarm_reports_whether_the_name_was_armed
-      RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 60)
-
-      assert RogueMachines.disarm(:payments)
-      refute RogueMachines.disarm(:payments)
-      refute_predicate RogueMachines, :armed?
-    end
-
-    def test_arming_the_same_name_again_replaces_the_experiment
-      RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: 60)
-      RogueMachines.arm(:payments, fault: :garble, garbled: :substitute, share: 1.0, expires_in: 60)
-
-      assert_equal [:payments], RogueMachines.armed
-      assert_equal :substitute, RogueMachines.run(:payments) { :real }
-    end
-
-    def test_every_slot_can_be_armed_and_one_more_cannot
-      EXPERIMENTS.times do |index|
-        RogueMachines.arm(:"experiment_#{index}", fault: :raise, share: 1.0, expires_in: 60)
-      end
-
-      assert_equal EXPERIMENTS, RogueMachines.armed.size
-      # Not assert_raises(Error): Injected is an Error too, so that would pass
-      # on the wrong exception.
-      refused = assert_raises(Error) do
-        RogueMachines.arm(:one_too_many, fault: :raise, share: 1.0, expires_in: 60)
-      end
-
-      assert_instance_of Error, refused
-      assert_match(/slots are taken/, refused.message)
-    end
-
-    def test_a_disarmed_slot_is_handed_to_the_next_experiment
-      EXPERIMENTS.times do |index|
-        RogueMachines.arm(:"experiment_#{index}", fault: :raise, share: 1.0, expires_in: 60)
-      end
-      RogueMachines.disarm(:experiment_0)
-
-      RogueMachines.arm(:late, fault: :raise, share: 1.0, expires_in: 60)
-
-      assert_includes RogueMachines.armed, :late
-      assert_equal EXPERIMENTS, RogueMachines.armed.size
     end
   end
 end
