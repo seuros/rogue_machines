@@ -95,7 +95,7 @@ impl Rogue {
     /// already holds exactly that value, so [`Arming::AlreadyArmed`] is
     /// provable and nothing changes.
     pub fn arm(&mut self, slot: Slot, experiment: Experiment) -> Arming {
-        let held = &mut self.experiments[slot.index()];
+        let held = self.held_mut(slot);
         let arming = match *held {
             None => Arming::Armed,
             Some(previous) if previous == experiment => return Arming::AlreadyArmed,
@@ -108,7 +108,7 @@ impl Rogue {
 
     /// Empties `slot`, whether or not what it held had expired. Never refuses.
     pub const fn disarm(&mut self, slot: Slot) -> Disarming {
-        match self.experiments[slot.index()].take() {
+        match self.held_mut(slot).take() {
             Some(experiment) => {
                 self.armed &= !slot.bit();
                 Disarming::Disarmed(experiment)
@@ -138,6 +138,7 @@ impl Rogue {
             if held.is_some_and(|experiment| experiment.spent(now)) {
                 *held = None;
                 self.armed &= !(1_u32 << index);
+                // At most `EXPERIMENTS`.
                 retired += 1;
             }
         }
@@ -163,6 +164,7 @@ impl Rogue {
         let mut live = 0;
         for experiment in self.experiments.iter().flatten() {
             if !experiment.spent(now) {
+                // At most `EXPERIMENTS`.
                 live += 1;
             }
         }
@@ -178,13 +180,31 @@ impl Rogue {
     /// The experiment `slot` holds, expired or not.
     #[must_use]
     pub const fn experiment(&self, slot: Slot) -> Option<Experiment> {
-        self.experiments[slot.index()]
+        self.held(slot)
     }
 
     /// The experiment `slot` holds, if it is live at `now`.
     #[must_use]
     pub fn active(&self, slot: Slot, now: Duration) -> Option<Experiment> {
-        self.experiments[slot.index()].filter(|experiment| !experiment.spent(now))
+        self.held(slot).filter(|experiment| !experiment.spent(now))
+    }
+
+    /// The entry `slot` names.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "a `Slot` is below `EXPERIMENTS` by construction, the table's length"
+    )]
+    const fn held(&self, slot: Slot) -> Option<Experiment> {
+        self.experiments[slot.index()]
+    }
+
+    /// The entry `slot` names, to change.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "a `Slot` is below `EXPERIMENTS` by construction, the table's length"
+    )]
+    const fn held_mut(&mut self, slot: Slot) -> &mut Option<Experiment> {
+        &mut self.experiments[slot.index()]
     }
 
     /// What to do with one call: inject when `slot` holds an experiment that

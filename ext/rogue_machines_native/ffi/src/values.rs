@@ -6,10 +6,10 @@
 //! `initialize` calls a private hook here, so a hand-built value is held to
 //! the same rule as one the binding returns.
 
-use magnus::{Error, RArray, RModule, Ruby, Symbol, Value, function, prelude::*};
+use magnus::{Error, RArray, RModule, Ruby, Value, function, prelude::*};
 use matryona_machines::ruby::{
-    Bounded, Choice, Class, Registry, SymbolNames, duration, exact_fields, integer, nanoseconds,
-    symbol_or_fields_with,
+    Bounded, Choice, Class, Refused, SymbolNames, class_name, duration, exact_fields, integer,
+    nanoseconds, symbol_or_fields_why,
 };
 use rogue_machines::{Draw, Experiment, Fault, Fraction, Slot};
 
@@ -26,12 +26,11 @@ pub struct Classes {
     disarmed: Class,
 }
 
-static CLASSES: Registry<Classes> = Registry::new("rogue_machines");
-
-/// The classes, or a `RuntimeError` when the extension was loaded without
-/// `rogue_machines.rb` defining them first.
-pub fn classes(ruby: &Ruby) -> Result<&'static Classes, Error> {
-    CLASSES.get(ruby)
+matryona_machines::registry! {
+    static CLASSES: Classes = "rogue_machines";
+    /// The classes, or a `NameError` when the extension was loaded without
+    /// `rogue_machines.rb` defining them first.
+    pub fn classes;
 }
 
 fn range_error(ruby: &Ruby, message: String) -> Error {
@@ -124,14 +123,14 @@ matryona_machines::symbols! {
 /// other Symbol, `TypeError` for anything else, each naming what it got.
 fn fault(ruby: &Ruby, value: Value) -> Result<Fault, Error> {
     let delay = classes(ruby)?.delay.get(ruby);
-    let message = || {
-        let got = match Symbol::from_value(value).map(Symbol::name) {
-            Some(Ok(name)) => format!(":{name}"),
-            _ => value.class().to_string(),
+    let read = symbol_or_fields_why(ruby, value, Faults, &[delay], |why| {
+        let got = match why {
+            Refused::UnknownSymbol(symbol) => symbol.inspect(),
+            _ => class_name(value),
         };
         format!("a fault is :raise, :garble or a Delay, got {got}")
-    };
-    match symbol_or_fields_with(ruby, value, Faults, &[delay], message)? {
+    })?;
+    match read {
         Choice::Symbol(fault) => Ok(fault),
         Choice::Struct(_, [span]) => Ok(Fault::Delay(duration(span, "duration")?)),
     }
@@ -178,11 +177,18 @@ impl Classes {
     }
 
     pub fn replaced(&self, ruby: &Ruby, experiment: Experiment) -> Result<Value, Error> {
-        Self::build(ruby, self.replaced, (self.experiment(ruby, experiment)?,))
+        self.held(ruby, self.replaced, experiment)
     }
 
     pub fn disarmed(&self, ruby: &Ruby, experiment: Experiment) -> Result<Value, Error> {
-        Self::build(ruby, self.disarmed, (self.experiment(ruby, experiment)?,))
+        self.held(ruby, self.disarmed, experiment)
+    }
+
+    /// A `Replaced` or `Disarmed`: the experiment, and `garbled` nil. The
+    /// core keeps no substitute; the one these carry is the runtime's.
+    fn held(&self, ruby: &Ruby, class: Class, experiment: Experiment) -> Result<Value, Error> {
+        let garbled = ruby.qnil().as_value();
+        Self::build(ruby, class, (self.experiment(ruby, experiment)?, garbled))
     }
 }
 
@@ -229,7 +235,18 @@ fn checked_fault(ruby: &Ruby, given: Value) -> Result<Value, Error> {
     fault(ruby, given).map(|_| given)
 }
 
-/// `Replaced.new` and `Disarmed.new`: an `Experiment`.
+/// `__delay_of`: what the runtime's `arm` bounds before it arms, read as
+/// every fault is read (`fault`'s errors, a `Delay` by exact class from the
+/// struct): nil for `:raise` and `:garble`, a `Delay`'s Integer nanoseconds.
+fn delay_of(ruby: &Ruby, given: Value) -> Result<Option<Value>, Error> {
+    Ok(match fault(ruby, given)? {
+        Fault::Delay(span) => Some(nanoseconds(ruby, span).as_value()),
+        Fault::Raise | Fault::Garble => None,
+    })
+}
+
+/// `Replaced.new` and `Disarmed.new`: an `Experiment` (their `garbled` is
+/// any object and is not read here).
 fn checked_held(ruby: &Ruby, given: Value) -> Result<Value, Error> {
     experiment(ruby, given).map(|_| given)
 }
@@ -263,6 +280,7 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     module.define_singleton_method("__delay", function!(checked_delay, 1))?;
     module.define_singleton_method("__experiment", function!(checked_experiment, 3))?;
     module.define_singleton_method("__fault", function!(checked_fault, 1))?;
+    module.define_singleton_method("__delay_of", function!(delay_of, 1))?;
     module.define_singleton_method("__held", function!(checked_held, 1))?;
     module.define_singleton_method("__spent", function!(spent, 2))?;
     module.define_singleton_method("__covers", function!(covers, 2))?;

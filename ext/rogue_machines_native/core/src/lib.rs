@@ -1,4 +1,5 @@
 #![no_std]
+#![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 
 //! Fault injection: making a dependency fail, stall or lie on purpose.
 //!

@@ -13,7 +13,7 @@ module RogueMachines
     def test_a_delay_longer_than_the_deadline_trips_it_instead_of_sleeping_past_it
       RogueMachines.arm(:slow, fault: Delay.new(30 * SECOND), share: 1.0, expires_in: 60 * SECOND)
 
-      elapsed = DeadlineMachines.with_deadline(0.05) do
+      elapsed = DeadlineMachines.with_deadline(SECOND / 20) do
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         assert_raises(DeadlineMachines::Error) { RogueMachines.run(:slow) { :real } }
         Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
@@ -27,7 +27,7 @@ module RogueMachines
     def test_a_delay_inside_the_deadline_still_makes_the_real_call
       RogueMachines.arm(:slow, fault: Delay.new(SECOND / 1000), share: 1.0, expires_in: 60 * SECOND)
 
-      DeadlineMachines.with_deadline(5) do
+      DeadlineMachines.with_deadline(5 * SECOND) do
         assert_equal :real, RogueMachines.run(:slow) { :real }
       end
     end
@@ -35,7 +35,7 @@ module RogueMachines
     def test_a_spent_deadline_raises_before_the_delay_rather_than_sleeping_forever
       RogueMachines.arm(:slow, fault: Delay.new(30 * SECOND), share: 1.0, expires_in: 60 * SECOND)
 
-      DeadlineMachines.with_deadline(0.001) do
+      DeadlineMachines.with_deadline(SECOND / 1000) do
         sleep 0.01
         assert_raises(DeadlineMachines::Error) { RogueMachines.run(:slow) { :real } }
       end

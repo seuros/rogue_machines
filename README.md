@@ -232,15 +232,20 @@ otherwise, a subclass included) and is rebuilt through the core's constructors
   `RogueMachines.arm` answering `:full` when every slot holds a live
   experiment under another name; it changes nothing and never raises.
 - **Answers say what held before.** Arming answers `:armed`, a `Replaced`
-  holding the experiment it displaced (expired or not), or `:already_armed`;
-  disarming answers a `Disarmed` holding what was there, or `:not_armed`.
+  holding the experiment it displaced (expired or not) and, from the runtime,
+  the `garbled:` substitute that went with it (`nil` for none; the core mirror
+  `Rogue` keeps no substitutes, so its `Replaced` always holds `nil`), or
+  `:already_armed`;
+  disarming answers a `Disarmed` holding what was there and, from the
+  runtime, the substitute it removed (`nil` for none, always `nil` from
+  `Rogue`), or `:not_armed`.
 - **Honoured repeats.** Re-arming a slot with the identical experiment and
   disarming an empty slot are provable from the slot itself, so they are
   honoured and change nothing. In the runtime a `:garble` substitute is part
   of what is armed: `RogueMachines.arm` answers `:already_armed` only when the
   stored substitute is equal (`==`) too; a differing one replaces it and
-  answers a `Replaced` holding the experiment, as a differing experiment
-  does.
+  answers a `Replaced` holding the experiment and the old substitute, as a
+  differing experiment does.
 - **Queries are pure.** In the core and in `Rogue`, every query judges expiry
   against the instant it is given and changes nothing; only `sweep` empties
   expired slots. The runtime's `armed`, `armed?`, `run` and `arm` sweep on

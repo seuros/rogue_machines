@@ -61,16 +61,31 @@ module RogueMachines
       assert_equal 'a fault is :raise, :garble or a Delay, got Integer', other.message
     end
 
+    # A value with an opened singleton class names its real class, never
+    # `#<Class:#<Object:0x...>>`, and a redefined `class` is not consulted.
+    def test_a_refused_fault_names_its_real_class
+      opened = Object.new
+      def opened.class = Delay
+
+      error = assert_raises(TypeError) { Inject.new(opened) }
+
+      assert_equal 'a fault is :raise, :garble or a Delay, got Object', error.message
+    end
+
     def test_the_answer_values_hold_only_what_the_core_could_answer
       experiment = Experiment.new(:garble, Fraction::NONE, 1)
 
       assert_equal :raise, Inject.new(:raise).fault
-      assert_equal experiment, Replaced.new(experiment).experiment
-      assert_equal experiment, Disarmed.new(experiment).experiment
+      assert_equal experiment, Replaced.new(experiment, nil).experiment
+      assert_equal [experiment, :old], Replaced.new(experiment, :old).deconstruct
+      assert_equal experiment, Disarmed.new(experiment, nil).experiment
+      assert_equal [experiment, :old], Disarmed.new(experiment, :old).deconstruct
       assert_raises(RangeError) { Inject.new(:nope) }
       assert_raises(TypeError) { Inject.new(5) }
-      assert_raises(TypeError) { Replaced.new(:raise) }
-      assert_raises(TypeError) { Disarmed.new(nil) }
+      assert_raises(TypeError) { Replaced.new(:raise, nil) }
+      assert_raises(ArgumentError) { Replaced.new(experiment) }
+      assert_raises(TypeError) { Disarmed.new(nil, nil) }
+      assert_raises(ArgumentError) { Disarmed.new(experiment) }
     end
 
     def test_a_value_built_by_hand_equals_the_one_the_core_returns
@@ -80,7 +95,7 @@ module RogueMachines
 
       assert_equal experiment, rogue.experiment(Slot.new(1))
       assert_equal Slot.new(0), rogue.vacant
-      assert_equal Replaced.new(experiment), rogue.arm(Slot.new(1), Experiment.new(:raise, Fraction::ALL, 1))
+      assert_equal Replaced.new(experiment, nil), rogue.arm(Slot.new(1), Experiment.new(:raise, Fraction::ALL, 1))
     end
 
     def test_the_value_predicates_are_the_cores
@@ -102,7 +117,7 @@ module RogueMachines
         assert_raises(NoMethodError) { value.allocate }
       end
       assert_raises(RangeError) { Slot.new(0).with(index: EXPERIMENTS) }
-      %i[__slot __fraction __draw __delay __experiment __fault __held __spent __covers].each do |hook|
+      %i[__slot __fraction __draw __delay __experiment __fault __delay_of __held __spent __covers].each do |hook|
         assert_raises(NoMethodError) { RogueMachines.public_send(hook, 0) }
       end
     end

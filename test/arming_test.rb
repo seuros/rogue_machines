@@ -24,7 +24,32 @@ module RogueMachines
       assert_equal :armed, RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: MINUTE)
       answer = RogueMachines.arm(:payments, fault: :garble, share: 1.0, expires_in: MINUTE)
 
-      assert_equal Replaced.new(Experiment.new(:raise, Fraction::ALL, MINUTE)), answer
+      assert_equal Replaced.new(Experiment.new(:raise, Fraction::ALL, MINUTE), nil), answer
+    end
+
+    # A replacement says what the name held, the substitute included: the
+    # payload is part of what is armed, so it is part of what was displaced.
+    def test_a_replacement_carries_the_substitute_it_displaced
+      RogueMachines.arm(:lies, fault: :garble, garbled: [1], share: 1.0, expires_in: MINUTE)
+      answer = RogueMachines.arm(:lies, fault: :raise, share: 1.0, expires_in: MINUTE)
+
+      assert_equal Replaced.new(Experiment.new(:garble, Fraction::ALL, MINUTE), [1]), answer
+      answer = RogueMachines.arm(:lies, fault: :garble, garbled: [3], share: 1.0, expires_in: MINUTE)
+
+      assert_equal Replaced.new(Experiment.new(:raise, Fraction::ALL, MINUTE), nil), answer
+    end
+
+    # Disarming says what the name held, the substitute included, as a
+    # replacement does: it leaves with the experiment.
+    def test_a_disarm_carries_the_substitute_it_removed
+      RogueMachines.arm(:lies, fault: :garble, garbled: [1], share: 1.0, expires_in: MINUTE)
+
+      assert_equal Disarmed.new(Experiment.new(:garble, Fraction::ALL, MINUTE), [1]), RogueMachines.disarm(:lies)
+      assert_equal :not_armed, RogueMachines.disarm(:lies)
+      # A garble armed without a substitute removes none.
+      RogueMachines.arm(:lies, fault: :garble, share: 1.0, expires_in: MINUTE)
+
+      assert_nil RogueMachines.disarm(:lies).garbled
     end
 
     def test_rearming_the_same_experiment_at_the_same_instant_is_an_honoured_repeat
@@ -48,7 +73,7 @@ module RogueMachines
       assert_equal before, snapshot
       answer = RogueMachines.arm(:lies, fault: :garble, garbled: [2], share: 1.0, expires_in: MINUTE)
 
-      assert_equal Replaced.new(Experiment.new(:garble, Fraction::ALL, MINUTE)), answer
+      assert_equal Replaced.new(Experiment.new(:garble, Fraction::ALL, MINUTE), [1]), answer
       assert_equal [2], RogueMachines.run(:lies) { :real }
     end
 
@@ -83,6 +108,37 @@ module RogueMachines
       assert_raises(RangeError) { RogueMachines.arm(:p, fault: :explode, share: 1.0, expires_in: MINUTE) }
       assert_raises(TypeError) { RogueMachines.arm(:p, fault: 'raise', share: 1.0, expires_in: MINUTE) }
       assert_raises(TypeError) { RogueMachines.arm(:p, fault: 5, share: 1.0, expires_in: MINUTE) }
+    end
+
+    # The runtime reads the fault natively, as Experiment.new does: the
+    # binding's message, and neither `Delay#duration` nor a leaked subclass
+    # decides what is armed.
+    def test_arm_reads_its_fault_natively
+      [:explode, 'raise', Object.new].each do |fault|
+        expected = assert_raises(TypeError, RangeError) { Experiment.new(fault, Fraction::ALL, 1) }
+        error = assert_raises(expected.class) { RogueMachines.arm(:p, fault: fault, share: 1.0, expires_in: MINUTE) }
+        assert_equal expected.message, error.message
+      end
+
+      long = Delay.new(LONGEST_DELAY + 1)
+      Delay.alias_method(:__honest, :duration)
+      Delay.define_method(:duration) { 1 }
+      error = assert_raises(RangeError) { RogueMachines.arm(:p, fault: long, share: 1.0, expires_in: MINUTE) }
+      assert_equal "a delay is 1..#{LONGEST_DELAY} nanoseconds, got #{LONGEST_DELAY + 1}", error.message
+      assert_equal :armed, RogueMachines.arm(:p, fault: Delay.new(LONGEST_DELAY), share: 1.0, expires_in: MINUTE)
+    ensure
+      Delay.alias_method(:duration, :__honest)
+      Delay.remove_method(:__honest)
+    end
+
+    def test_a_marshal_edited_delay_is_refused_before_anything_is_armed
+      forged = Marshal.load(Marshal.dump(Delay.new(SECOND)).sub("i\x04\x00\xCA\x9A;".b, "i\xFA".b))
+
+      assert_equal(-1, forged.duration)
+      expected = assert_raises(RangeError) { Inject.new(forged) }
+      error = assert_raises(RangeError) { RogueMachines.arm(:p, fault: forged, share: 1.0, expires_in: MINUTE) }
+      assert_equal expected.message, error.message
+      refute_predicate RogueMachines, :armed?
     end
 
     def test_a_share_is_a_whole_at_most_and_expressible
@@ -156,7 +212,7 @@ module RogueMachines
     def test_disarm_hands_back_what_the_name_held_and_a_repeat_is_not_armed
       RogueMachines.arm(:payments, fault: :raise, share: 1.0, expires_in: MINUTE)
 
-      assert_equal Disarmed.new(Experiment.new(:raise, Fraction::ALL, MINUTE)), RogueMachines.disarm(:payments)
+      assert_equal Disarmed.new(Experiment.new(:raise, Fraction::ALL, MINUTE), nil), RogueMachines.disarm(:payments)
       before = snapshot
 
       assert_equal :not_armed, RogueMachines.disarm('payments')

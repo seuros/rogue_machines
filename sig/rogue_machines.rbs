@@ -85,18 +85,25 @@ module RogueMachines
                 | (fault: fault) -> Inject
   end
 
-  # The core's `Arming::Replaced`: what the slot held before, expired or not.
+  # The core's `Arming::Replaced`: what the slot held before, expired or not,
+  # and the runtime's `garbled:` substitute held with it (nil when there was
+  # none, and always nil from `Rogue#arm`: the core keeps no substitutes).
   class Replaced < ::Data
     attr_reader experiment: Experiment
-    def self.new: (Experiment experiment) -> Replaced
-                | (experiment: Experiment) -> Replaced
+    attr_reader garbled: untyped
+    def self.new: (Experiment experiment, untyped garbled) -> Replaced
+                | (experiment: Experiment, garbled: untyped) -> Replaced
   end
 
-  # The core's `Disarming::Disarmed`: what the slot held, expired or not.
+  # The core's `Disarming::Disarmed`: what the slot held, expired or not,
+  # and the runtime's `garbled:` substitute removed with it (nil when there
+  # was none, and always nil from `Rogue#disarm`: the core keeps no
+  # substitutes).
   class Disarmed < ::Data
     attr_reader experiment: Experiment
-    def self.new: (Experiment experiment) -> Disarmed
-                | (experiment: Experiment) -> Disarmed
+    attr_reader garbled: untyped
+    def self.new: (Experiment experiment, untyped garbled) -> Disarmed
+                | (experiment: Experiment, garbled: untyped) -> Disarmed
   end
 
   type arming = :armed | Replaced | :already_armed
@@ -180,15 +187,16 @@ module RogueMachines
   # in 1..LONGEST_EXPERIMENT; a Delay 1..LONGEST_DELAY. Honoured: the core's
   # arming answer for the name's slot, except that :already_armed needs an
   # equal (==) `garbled:` substitute too; a differing one replaces it and
-  # answers Replaced holding the experiment. Refused, unchanged: :full
+  # answers Replaced holding the experiment. Every Replaced it answers holds
+  # the substitute it displaced (nil for none). Refused, unchanged: :full
   # when every slot holds a live experiment. Raises TypeError/RangeError for
   # malformed arguments or clock readings, and Error when the clock was
   # replaced READINGS times while arming; nothing is armed when it raises.
   def self.arm: (Symbol | String name, fault: fault, share: Fraction | Numeric, expires_in: Integer,
                  ?garbled: untyped) -> (arming | :full)
 
-  # Honoured: Disarmed (what the name held, expired or not), :not_armed.
-  # Takes no reading.
+  # Honoured: Disarmed (what the name held, expired or not, with the
+  # substitute it removed, nil for none), :not_armed. Takes no reading.
   def self.disarm: (Symbol | String name) -> disarming
 
   # Experiments held, expired or not; 0 is unchanged.
@@ -206,4 +214,39 @@ module RogueMachines
   # the ambient budget). Raises TypeError/RangeError for a malformed name,
   # draw or reading.
   def self.run: (Symbol | String name) { () -> untyped } -> untyped
+
+  # Private native hooks behind the Data values: each answers the field as
+  # the core holds it, TypeError/RangeError for what the core rejects.
+  private def self.__slot: (Integer index) -> Integer
+  private def self.__fraction: (Integer millionths) -> Integer
+  private def self.__draw: (Integer millionths) -> Integer
+  private def self.__delay: (Integer duration) -> Integer
+  private def self.__experiment: (fault fault, Fraction fraction, Integer expires_at) -> [fault, Fraction, Integer]
+  private def self.__fault: (fault fault) -> fault
+  private def self.__held: (Experiment experiment) -> Experiment
+  # A Delay's Integer nanoseconds, nil for :raise and :garble.
+  private def self.__delay_of: (fault fault) -> Integer?
+  private def self.__spent: (Experiment experiment, Integer now) -> bool
+  private def self.__covers: (Fraction fraction, Draw draw) -> bool
+
+  # Private runtime helpers. `key` is the checked name as a frozen String.
+  private def self.arm_at: (String key, Experiment experiment, untyped payload, Integer now) -> (arming | :full)
+  private def self.disarmed: (disarming answer, untyped removed) -> disarming
+  private def self.replaced: (arming answer, Experiment experiment, untyped previous, bool same_payload) -> arming
+  private def self.decide_at: (String key, Integer now, Draw drawn) -> [Inject | :pass, untyped]
+  private def self.retire: (Integer now) -> void
+  # `[block's answer]` for a reading against the clock still installed once
+  # the lock is held, nil after READINGS attempts.
+  private def self.locked_reading: [T] () { (Integer now) -> T } -> [T]?
+  # Raises TypeError for a non-Integer reading, RangeError for a negative one.
+  private def self.checked_reading: (_Clock source, Integer now) -> nil
+  # Raises TypeError for a non-Symbol/String name, RangeError for an empty or
+  # illegible one.
+  private def self.legible: (Symbol | String name) -> nil
+  private def self.named: (Symbol | String name) -> String
+  private def self.fraction_of: (Fraction | Numeric share) -> Fraction
+  private def self.checked_fault: (fault fault) -> nil
+  private def self.span_of: (Integer expires_in) -> Integer
+  private def self.perform: (Symbol | String name, fault fault, untyped payload) { () -> untyped } -> untyped
+  private def self.stall: (Integer delay_ns) -> void
 end

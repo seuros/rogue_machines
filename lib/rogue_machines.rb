@@ -72,17 +72,21 @@ module RogueMachines
     end
   end
 
-  # The core's `Arming::Replaced`: the experiment the slot held before.
-  Replaced = Data.define(:experiment) do
-    def initialize(experiment:)
-      super(experiment: RogueMachines.__send__(:__held, experiment))
+  # The core's `Arming::Replaced`: the experiment the slot held before, and
+  # the `garbled:` substitute the runtime held with it (any object, or nil;
+  # always nil from the core mirror `Rogue`, which keeps no substitutes).
+  Replaced = Data.define(:experiment, :garbled) do
+    def initialize(experiment:, garbled:)
+      super(experiment: RogueMachines.__send__(:__held, experiment), garbled:)
     end
   end
 
-  # The core's `Disarming::Disarmed`: the experiment the slot held.
-  Disarmed = Data.define(:experiment) do
-    def initialize(experiment:)
-      super(experiment: RogueMachines.__send__(:__held, experiment))
+  # The core's `Disarming::Disarmed`: the experiment the slot held, and the
+  # `garbled:` substitute the runtime removed with it (any object, or nil;
+  # always nil from the core mirror `Rogue`, which keeps no substitutes).
+  Disarmed = Data.define(:experiment, :garbled) do
+    def initialize(experiment:, garbled:)
+      super(experiment: RogueMachines.__send__(:__held, experiment), garbled:)
     end
   end
 end
@@ -92,7 +96,7 @@ end
 require 'rogue_machines_native/rogue_machines_native'
 
 module RogueMachines
-  private_class_method :__slot, :__fraction, :__draw, :__delay, :__experiment, :__fault, :__held,
+  private_class_method :__slot, :__fraction, :__draw, :__delay, :__experiment, :__fault, :__delay_of, :__held,
                        :__spent, :__covers
 
   # The core's `Fraction::NONE` and `Fraction::ALL`.

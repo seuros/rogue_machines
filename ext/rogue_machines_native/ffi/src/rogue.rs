@@ -15,10 +15,35 @@ use std::cell::RefCell;
 
 use magnus::typed_data::Obj;
 use magnus::{Error, RModule, Ruby, Value, function, method, prelude::*};
-use matryona_machines::ruby::{duration, keep, symbol};
+use matryona_machines::ruby::{SymbolNames, duration, keep};
 use rogue_machines::{Arming, Decision, Disarming, Rogue};
 
 use crate::values::{classes, draw, experiment, slot};
+
+matryona_machines::symbols! {
+    /// What `arm` answers: `:armed`, `:already_armed`, or a `Replaced`.
+    Armings for Arming as "an arming" => names_only {
+        Armed => "armed",
+        Replaced(..) => "replaced",
+        AlreadyArmed => "already_armed",
+    }
+}
+
+matryona_machines::symbols! {
+    /// What `disarm` answers: a `Disarmed`, or `:not_armed`.
+    Disarmings for Disarming as "a disarming" => names_only {
+        Disarmed(..) => "disarmed",
+        NotArmed => "not_armed",
+    }
+}
+
+matryona_machines::symbols! {
+    /// What `decide` answers: `:pass`, or an `Inject`.
+    Decisions for Decision as "a decision" => names_only {
+        Pass => "pass",
+        Inject(..) => "inject",
+    }
+}
 
 #[magnus::wrap(class = "RogueMachines::Rogue", free_immediately, size)]
 struct Wrapper(RefCell<Rogue>);
@@ -44,9 +69,10 @@ impl Wrapper {
             &this.0,
             |rogue| rogue.arm(slot, experiment),
             |arming| match arming {
-                Arming::Armed => Ok(symbol(ruby, "armed").as_value()),
                 Arming::Replaced(previous) => classes.replaced(ruby, previous),
-                Arming::AlreadyArmed => Ok(symbol(ruby, "already_armed").as_value()),
+                Arming::Armed | Arming::AlreadyArmed => {
+                    Ok(Armings::symbol(ruby, &arming).as_value())
+                }
             },
         )
     }
@@ -63,7 +89,7 @@ impl Wrapper {
             |rogue| rogue.disarm(slot),
             |disarming| match disarming {
                 Disarming::Disarmed(previous) => classes.disarmed(ruby, previous),
-                Disarming::NotArmed => Ok(symbol(ruby, "not_armed").as_value()),
+                Disarming::NotArmed => Ok(Disarmings::symbol(ruby, &disarming).as_value()),
             },
         )
     }
@@ -130,7 +156,7 @@ impl Wrapper {
         let drawn = draw(ruby, given_draw)?;
         let decision = this.0.borrow().decide(slot, now, drawn);
         match decision {
-            Decision::Pass => Ok(symbol(ruby, "pass").as_value()),
+            Decision::Pass => Ok(Decisions::symbol(ruby, &decision).as_value()),
             Decision::Inject(fault) => classes(ruby)?.inject(ruby, fault),
         }
     }

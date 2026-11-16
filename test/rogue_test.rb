@@ -32,7 +32,7 @@ module RogueMachines
       second = Experiment.new(Delay.new(5), Fraction::ALL, 100)
 
       assert_equal :armed, @rogue.arm(Slot.new(0), first)
-      assert_equal Replaced.new(first), @rogue.arm(Slot.new(0), second)
+      assert_equal Replaced.new(first, nil), @rogue.arm(Slot.new(0), second)
       assert_equal Inject.new(Delay.new(5)), @rogue.decide(Slot.new(0), 0, Draw.new(0))
     end
 
@@ -47,7 +47,7 @@ module RogueMachines
     def test_disarming_says_what_the_slot_held_and_a_repeat_changes_nothing
       @rogue.arm(Slot.new(0), raising(100))
 
-      assert_equal Disarmed.new(raising(100)), @rogue.disarm(Slot.new(0))
+      assert_equal Disarmed.new(raising(100), nil), @rogue.disarm(Slot.new(0))
       before = state
 
       assert_equal :not_armed, @rogue.disarm(Slot.new(0))

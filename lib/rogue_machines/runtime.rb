@@ -85,8 +85,8 @@ module RogueMachines
       found.first
     end
 
-    # What `name`'s slot held (a Disarmed, expired or not), or :not_armed.
-    # Takes no reading.
+    # What `name`'s slot held (a Disarmed, expired or not, carrying the
+    # substitute it removed), or :not_armed. Takes no reading.
     def disarm(name)
       key = named(name)
       @lock.synchronize do
@@ -94,8 +94,8 @@ module RogueMachines
           slot = @slots.delete(key)
           next :not_armed unless slot
 
-          @substitutes.delete(key)
-          @rogue.disarm(slot)
+          removed = @substitutes.delete(key)
+          disarmed(@rogue.disarm(slot), removed)
         end
       end
     end
@@ -153,7 +153,8 @@ module RogueMachines
     #
     # The substitute is part of what is armed: the core's :already_armed
     # stands only when the stored one is equal too. A differing one is a
-    # replacement, answered as the core answers a differing experiment.
+    # replacement, answered as the core answers a differing experiment. Every
+    # Replaced carries the substitute it displaced.
     def arm_at(key, experiment, payload, now)
       return :full unless @slots.key?(key) || @rogue.vacant || @rogue.live_count(now) < @rogue.armed_count
 
@@ -163,11 +164,31 @@ module RogueMachines
         # Everything that runs caller code (the substitute's `==`, the answer
         # values' `new`) runs before a store changes; the Rogue's own `arm`
         # applies nothing when it raises.
-        same_payload = @substitutes[key] == payload
+        previous = @substitutes[key]
+        same_payload = previous == payload
         answer = @rogue.arm(slot, experiment)
         @slots[key] = slot
         payload.nil? ? @substitutes.delete(key) : @substitutes[key] = payload
-        answer == :already_armed && !same_payload ? Replaced.new(experiment) : answer
+        replaced(answer, experiment, previous, same_payload)
+      end
+    end
+
+    # The runtime's answer for the core's disarming `answer`: a Disarmed
+    # holding the substitute it removed.
+    def disarmed(answer, removed)
+      case answer
+      when Disarmed then Disarmed.new(answer.experiment, removed)
+      else answer
+      end
+    end
+
+    # The runtime's answer for the core's `answer`: a Replaced holding the
+    # substitute it displaced, and :already_armed only for an equal one.
+    def replaced(answer, experiment, previous, same_payload)
+      case answer
+      when Replaced then Replaced.new(answer.experiment, previous)
+      when :already_armed then same_payload ? answer : Replaced.new(experiment, previous)
+      else answer
       end
     end
 
@@ -252,16 +273,14 @@ module RogueMachines
       Fraction.new(millionths)
     end
 
+    # The fault is read natively, as Experiment.new reads it, never through
+    # `Delay#duration` or `===`; only LONGEST_DELAY, this runtime's own bound,
+    # is checked here, on the duration that was read.
     def checked_fault(fault)
-      case fault
-      when :raise, :garble then nil
-      when Delay
-        return if fault.duration.between?(1, LONGEST_DELAY)
+      delay = RogueMachines.__send__(:__delay_of, fault)
+      return if delay.nil? || delay.between?(1, LONGEST_DELAY)
 
-        raise RangeError, "a delay is 1..#{LONGEST_DELAY} nanoseconds, got #{fault.duration}"
-      when Symbol then raise RangeError, "fault is :raise, :garble or a Delay, got #{fault.inspect}"
-      else raise TypeError, "fault is :raise, :garble or a Delay, got #{fault.class}"
-      end
+      raise RangeError, "a delay is 1..#{LONGEST_DELAY} nanoseconds, got #{delay}"
     end
 
     def span_of(expires_in)
@@ -285,8 +304,8 @@ module RogueMachines
     # slow dependency trips the timeout that was already there.
     def stall(delay_ns)
       DeadlineMachines.check!
-      seconds = DeadlineMachines.clamp_sleep(delay_ns.fdiv(1_000_000_000))
-      sleep(seconds) if seconds.positive?
+      delay_ns = DeadlineMachines.clamp_sleep(delay_ns)
+      sleep(delay_ns.fdiv(1_000_000_000)) if delay_ns.positive?
       DeadlineMachines.check!
     end
   end
