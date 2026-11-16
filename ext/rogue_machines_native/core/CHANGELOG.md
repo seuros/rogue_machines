@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/seuros/rogue_machines/compare/rogue-machines-v0.4.0...rogue-machines-v0.5.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* carry the runtime's garbled substitute in Replaced and Disarmed
+
+### Features
+
+* carry the runtime's garbled substitute in Replaced and Disarmed ([acece66](https://github.com/seuros/rogue_machines/commit/acece668aa14809616fc90c3eb7f2c9665325dad))
+
 ## [0.4.0](https://github.com/seuros/rogue_machines/compare/rogue-machines-v0.3.0...rogue-machines-v0.4.0) (2026-11-14)
 
 
