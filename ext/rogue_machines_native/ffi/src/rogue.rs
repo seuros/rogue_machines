@@ -15,7 +15,7 @@ use std::cell::RefCell;
 
 use magnus::typed_data::Obj;
 use magnus::{Error, RModule, Ruby, Value, function, method, prelude::*};
-use matryona_machines::ruby::{SymbolNames, duration, keep};
+use matryona_machines::ruby::{Class, SymbolNames, duration, keep};
 use rogue_machines::{Arming, Decision, Disarming, Rogue};
 
 use crate::values::{classes, draw, experiment, slot};
@@ -188,5 +188,7 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     class.define_method("active", method!(Wrapper::active, 2))?;
     class.define_method("decide", method!(Wrapper::decide, 3))?;
     class.define_method("inspect", method!(Wrapper::inspect, 0))?;
-    Ok(())
+    // Fix magnus's class for `Wrapper` now: building a Rogue (`new`, `dup`)
+    // then runs no `Object.const_get` and always answers this class.
+    Class::pin_wrapped::<Wrapper>(ruby, class).map(drop)
 }
